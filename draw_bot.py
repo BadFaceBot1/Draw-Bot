@@ -14,8 +14,8 @@ from telegram.ext import (
 # TOKENS (FROM RAILWAY ENV VARIABLES)
 # ─────────────────────────────────────────
 
-TELEGRAM_TOKEN = os.getenv("8578968957:AAFf9gs1w3npCbqqhbVipkzGeH1bHBM8EqU")
-API_KEY = os.getenv("3ba2576116ed4ce20b0bb5e0d8d28249")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+API_KEY = os.getenv("API_FOOTBALL_KEY")
 
 BASE_URL = "https://v3.football.api-sports.io"
 
@@ -487,3 +487,4 @@ if __name__ == "__main__":
     print("Bot running...")
 
     app.run_polling()
+
