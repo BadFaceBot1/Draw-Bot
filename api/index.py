@@ -38,6 +38,16 @@ HEADERS = {
 }
 
 # ─────────────────────────────────────────
+# 3b. DYNAMIC SEASON CALCULATION
+# Before July  → previous year (e.g. Apr 2026 → season 2025)
+# July onwards → current year  (e.g. Aug 2026 → season 2026)
+# ─────────────────────────────────────────
+
+_now = datetime.utcnow()
+SEASON = _now.year - 1 if _now.month < 7 else _now.year
+print(f"[INFO] Active season: {SEASON}")
+
+# ─────────────────────────────────────────
 # 4. ALLOWED LEAGUES
 # ─────────────────────────────────────────
 
@@ -104,7 +114,7 @@ def get_matches_by_date(date_str):
         r = requests.get(
             f"{BASE_URL}/fixtures?date={date_str}&timezone=UTC",
             headers=HEADERS,
-            timeout=10,
+            timeout=7,
         )
         if r.status_code != 200:
             print(f"[API ERROR] Status code {r.status_code} for date {date_str}")
@@ -131,7 +141,7 @@ def get_standings(league_id, season):
         r = requests.get(
             f"{BASE_URL}/standings?league={league_id}&season={season}",
             headers=HEADERS,
-            timeout=10,
+            timeout=7,
         )
         groups = r.json().get("response", [])
         if not groups:
@@ -163,7 +173,7 @@ def get_recent_form(team_id, league_id, season):
         r = requests.get(
             f"{BASE_URL}/fixtures?team={team_id}&league={league_id}&season={season}&last=5",
             headers=HEADERS,
-            timeout=10,
+            timeout=7,
         )
         fixtures = r.json().get("response", [])
         results = []
@@ -193,7 +203,7 @@ def get_h2h(home_id, away_id):
         r = requests.get(
             f"{BASE_URL}/fixtures/headtohead?h2h={home_id}-{away_id}&last=5",
             headers=HEADERS,
-            timeout=10,
+            timeout=7,
         )
         fixtures = r.json().get("response", [])
         total = len(fixtures)
@@ -267,14 +277,13 @@ def run_analysis():
             if league_id not in ALLOWED_LEAGUES:
                 continue
 
-            season = game["league"]["season"]
             home_id = game["teams"]["home"]["id"]
             away_id = game["teams"]["away"]["id"]
             home_name = game["teams"]["home"]["name"]
             away_name = game["teams"]["away"]["name"]
             league_name = game["league"]["name"]
 
-            standings = get_standings(league_id, season)
+            standings = get_standings(league_id, SEASON)
             if not standings:
                 continue
 
@@ -283,8 +292,8 @@ def run_analysis():
             if not home or not away:
                 continue
 
-            form_h = get_recent_form(home_id, league_id, season)
-            form_a = get_recent_form(away_id, league_id, season)
+            form_h = get_recent_form(home_id, league_id, SEASON)
+            form_a = get_recent_form(away_id, league_id, SEASON)
             h2h = get_h2h(home_id, away_id)
 
             score = calculate_draw_score(home, away, form_h, form_a, h2h)
@@ -389,6 +398,7 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
         msg = (
             f"📊 Debug — Today's Matches\n\n"
             f"📅 Date used: {today} (UTC)\n"
+            f"📆 Active season: {SEASON}\n"
             f"📦 Total fixtures from API: {total}\n"
             f"✅ Matches in allowed leagues: {allowed_count}\n\n"
         )
