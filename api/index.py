@@ -223,46 +223,77 @@ return get_matches_by_date(today)
 
 ─────────────────────────────────────────
 
-def get_standings_by_season(season_id):
+dedef get_standings_by_season(season_id):
 
-key = str(season_id)
+    key = str(season_id)
 
-if key in standings_cache:
-    return standings_cache[key]
+    if key in standings_cache:
+        return standings_cache[key]
 
-data = _sm_get(
-    f"/standings/seasons/{season_id}",
-    {"include": "participant"}
-)
+    data = _sm_get(
+        f"/standings/seasons/{season_id}",
+        {"include": "participant;details"}
+    )
 
-if not data:
-    return None
+    if not data:
+        return None
 
-entries = data.get("data", [])
+    entries = data.get("data", [])
 
-result = {}
+    if not entries:
+        return None
 
-for entry in entries:
+    result = {}
 
-    team_id = entry.get("participant_id")
+    for entry in entries:
 
-    result[team_id] = {
+        team_id = entry.get("participant_id")
 
-        "rank": entry.get("position", 99),
+        if not team_id:
+            continue
 
-        "played": 10,
-        "draws": 3,
+        details = entry.get("details", [])
 
-        "goals_for": 10,
-        "goals_against": 10,
+        def get_detail(type_id):
+            for d in details:
+                if d.get("type_id") == type_id:
+                    try:
+                        return int(d.get("value", 0))
+                    except:
+                        return 0
+            return 0
 
-        "goal_diff": 0
+        played       = get_detail(45)
+        wins         = get_detail(46)
+        draws        = get_detail(47)
+        losses       = get_detail(48)
+        goals_for    = get_detail(52)
+        goals_against = get_detail(53)
 
-    }
+        if played == 0:
+            played = max(wins + draws + losses, 1)
 
-standings_cache[key] = result
+        goal_diff = goals_for - goals_against
 
-return result
+        result[team_id] = {
+            "rank":           entry.get("position", 99),
+            "played":         played,
+            "draws":          draws,
+            "goals_for":      goals_for,
+            "goals_against":  goals_against,
+            "goal_diff":      goal_diff
+        }
+
+        print(
+            f"[STANDINGS] Team {team_id} | "
+            f"Rank {entry.get('position')} | "
+            f"P{played} W{wins} D{draws} L{losses} "
+            f"GF{goals_for} GA{goals_against}"
+        )
+
+    standings_cache[key] = result
+
+    return result
 
 ─────────────────────────────────────────
 
