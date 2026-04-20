@@ -96,7 +96,7 @@ daily_results = None
 
 
 def get_today_matches():
-    today = datetime.today().strftime("%Y-%m-%d")
+    today = datetime.utcnow().strftime("%Y-%m-%d")
     try:
         r = requests.get(
             f"{BASE_URL}/fixtures?date={today}",
@@ -455,3 +455,4 @@ def run_daily():
     """
     run_analysis()
     return f"✅ Analysis complete: {daily_results[:80] if daily_results else 'No results'}", 200
+
