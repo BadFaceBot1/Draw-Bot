@@ -20,7 +20,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 ─────────────────────────────────────────
 
-app = Flask(name)
+app =app = Flask(__name__)
 
 ─────────────────────────────────────────
 
