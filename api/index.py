@@ -6,7 +6,7 @@ import os
 import time
 import asyncio
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Flask, request as flask_request
 from telegram import Update, BotCommand
@@ -32,7 +32,10 @@ if not API_KEY:
     raise RuntimeError("FOOTBALL_KEY (or API_FOOTBALL_KEY) environment variable is not set.")
 
 BASE_URL = "https://v3.football.api-sports.io"
-HEADERS = {"x-apisports-key": API_KEY}
+HEADERS = {
+    "x-apisports-key": API_KEY,
+    "Cache-Control": "no-cache",
+}
 
 # ─────────────────────────────────────────
 # 4. ALLOWED LEAGUES
@@ -95,18 +98,29 @@ daily_results = None
 # ─────────────────────────────────────────
 
 
-def get_today_matches():
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+def get_matches_by_date(date_str):
+    print(f"[INFO] Fetching fixtures for: {date_str}")
     try:
         r = requests.get(
-            f"{BASE_URL}/fixtures?date={today}",
+            f"{BASE_URL}/fixtures?date={date_str}&timezone=UTC",
             headers=HEADERS,
             timeout=10,
         )
-        return r.json().get("response", [])
+        if r.status_code != 200:
+            print(f"[API ERROR] Status code {r.status_code} for date {date_str}")
+            return []
+        matches = r.json().get("response", [])
+        filtered = [m for m in matches if m["league"]["id"] in ALLOWED_LEAGUES]
+        print(f"[INFO] Total fixtures: {len(matches)} | Filtered fixtures: {len(filtered)}")
+        return matches
     except Exception as e:
-        print(f"[ERROR] get_today_matches: {e}")
+        print(f"[ERROR] get_matches_by_date({date_str}): {e}")
         return []
+
+
+def get_today_matches():
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    return get_matches_by_date(today)
 
 
 def get_standings(league_id, season):
@@ -313,11 +327,14 @@ def run_analysis():
 # ─────────────────────────────────────────
 
 BOT_COMMANDS = [
-    BotCommand("start",        "Show the welcome message and command guide"),
-    BotCommand("strongdraws",  "View today's top draw picks"),
-    BotCommand("testdraws",    "Run a fresh analysis right now"),
-    BotCommand("debugmatches", "See how many matches are available today"),
-    BotCommand("health",       "Check if the bot is online"),
+    BotCommand("start",          "Show the welcome message and command guide"),
+    BotCommand("strongdraws",    "View today's top draw picks (updated at 00:05)"),
+    BotCommand("testdraws",      "Run a fresh analysis right now"),
+    BotCommand("debugmatches",   "Today's match count with league breakdown"),
+    BotCommand("rawfixtures",    "All fixtures today — no filter, raw API data"),
+    BotCommand("debugtomorrow",  "Tomorrow's match count and filtered results"),
+    BotCommand("debugyesterday", "Yesterday's match count and filtered results"),
+    BotCommand("health",         "Check if the bot is online"),
 ]
 
 
@@ -326,9 +343,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Welcome to the Strong Draw Predictor Bot!\n\n"
         "I analyse football matches across lower leagues and identify the strongest draw candidates using stats like standings, form, and head-to-head records.\n\n"
         "📋 Available Commands:\n\n"
-        "🎯 /strongdraws — View today's top draw picks\n\n"
+        "🎯 /strongdraws — View today's top draw picks (updated daily at 00:05)\n\n"
         "🔍 /testdraws — Run a fresh analysis right now\n\n"
-        "📊 /debugmatches — Show how many matches are scheduled today and how many fall inside the supported leagues\n\n"
+        "📊 /debugmatches — Today's fixture count with league breakdown\n\n"
+        "📡 /rawfixtures — All fixtures today, no filter — raw API data\n\n"
+        "📅 /debugtomorrow — Tomorrow's fixture count and filtered results\n\n"
+        "📅 /debugyesterday — Yesterday's fixture count and filtered results\n\n"
         "❤️ /health — Check if the bot is online and responding\n\n"
         "ℹ️ /start — Show this help menu\n\n"
         "──────────────────────\n"
@@ -358,16 +378,19 @@ async def testdraws_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await update.message.reply_text("📊 Fetching today's matches...")
-        matches = get_today_matches()
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        await update.message.reply_text(f"📊 Fetching matches for {today} (UTC)...")
+
+        matches = get_matches_by_date(today)
         total = len(matches)
         allowed = [m for m in matches if m["league"]["id"] in ALLOWED_LEAGUES]
         allowed_count = len(allowed)
 
         msg = (
             f"📊 Debug — Today's Matches\n\n"
-            f"Total matches today: {total}\n"
-            f"Matches in allowed leagues: {allowed_count}\n\n"
+            f"📅 Date used: {today} (UTC)\n"
+            f"📦 Total fixtures from API: {total}\n"
+            f"✅ Matches in allowed leagues: {allowed_count}\n\n"
         )
 
         if allowed:
@@ -378,7 +401,50 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
                 league = m["league"]["name"]
                 msg += f"• {home} vs {away}\n  🏆 {league}\n\n"
         else:
-            msg += "No matches found in allowed leagues today."
+            msg += "No matches found in allowed leagues today.\n\n"
+
+        if matches:
+            seen_leagues = []
+            for m in matches:
+                ln = m["league"]["name"]
+                if ln not in seen_leagues:
+                    seen_leagues.append(ln)
+                if len(seen_leagues) == 5:
+                    break
+            msg += "🌍 First 5 leagues in API response:\n"
+            for ln in seen_leagues:
+                msg += f"  • {ln}\n"
+
+        await update.message.reply_text(msg)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error fetching debug info: {e}")
+
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Bot is alive and running.")
+
+
+async def rawfixtures_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        await update.message.reply_text(f"📡 Fetching ALL fixtures for {today} (UTC) — no league filter...")
+
+        matches = get_matches_by_date(today)
+        total = len(matches)
+
+        if total == 0:
+            await update.message.reply_text(
+                f"📅 Date: {today}\n\n❌ API returned zero fixtures."
+            )
+            return
+
+        msg = f"📅 Date: {today}\n📊 Total Fixtures: {total}\n\nSample:\n\n"
+        for m in matches[:5]:
+            home = m["teams"]["home"]["name"]
+            away = m["teams"]["away"]["name"]
+            league = m["league"]["name"]
+            msg += f"⚽ {home} vs {away}\n🏆 {league}\n\n"
 
         await update.message.reply_text(msg)
 
@@ -386,8 +452,68 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"❌ Error: {e}")
 
 
-async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Bot is alive and running.")
+async def debugtomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
+        await update.message.reply_text(f"📅 Fetching fixtures for tomorrow: {tomorrow} (UTC)...")
+
+        matches = get_matches_by_date(tomorrow)
+        total = len(matches)
+        allowed = [m for m in matches if m["league"]["id"] in ALLOWED_LEAGUES]
+        allowed_count = len(allowed)
+
+        msg = (
+            f"📅 Tomorrow: {tomorrow} (UTC)\n"
+            f"📦 Total fixtures: {total}\n"
+            f"✅ Filtered (allowed leagues): {allowed_count}\n\n"
+        )
+
+        if allowed:
+            msg += "⚽ Sample matches (up to 5):\n\n"
+            for m in allowed[:5]:
+                home = m["teams"]["home"]["name"]
+                away = m["teams"]["away"]["name"]
+                league = m["league"]["name"]
+                msg += f"• {home} vs {away}\n  🏆 {league}\n\n"
+        else:
+            msg += "No matches found in allowed leagues tomorrow."
+
+        await update.message.reply_text(msg)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def debugyesterday_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+        await update.message.reply_text(f"📅 Fetching fixtures for yesterday: {yesterday} (UTC)...")
+
+        matches = get_matches_by_date(yesterday)
+        total = len(matches)
+        allowed = [m for m in matches if m["league"]["id"] in ALLOWED_LEAGUES]
+        allowed_count = len(allowed)
+
+        msg = (
+            f"📅 Yesterday: {yesterday} (UTC)\n"
+            f"📦 Total fixtures: {total}\n"
+            f"✅ Filtered (allowed leagues): {allowed_count}\n\n"
+        )
+
+        if allowed:
+            msg += "⚽ Sample matches (up to 5):\n\n"
+            for m in allowed[:5]:
+                home = m["teams"]["home"]["name"]
+                away = m["teams"]["away"]["name"]
+                league = m["league"]["name"]
+                msg += f"• {home} vs {away}\n  🏆 {league}\n\n"
+        else:
+            msg += "No matches found in allowed leagues yesterday."
+
+        await update.message.reply_text(msg)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 
 # ─────────────────────────────────────────
@@ -397,11 +523,14 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_update(update_data: dict):
     async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
-        application.add_handler(CommandHandler("start",        start_command))
-        application.add_handler(CommandHandler("strongdraws",  strongdraws_command))
-        application.add_handler(CommandHandler("testdraws",    testdraws_command))
-        application.add_handler(CommandHandler("debugmatches", debugmatches_command))
-        application.add_handler(CommandHandler("health",       health_command))
+        application.add_handler(CommandHandler("start",          start_command))
+        application.add_handler(CommandHandler("strongdraws",    strongdraws_command))
+        application.add_handler(CommandHandler("testdraws",      testdraws_command))
+        application.add_handler(CommandHandler("debugmatches",   debugmatches_command))
+        application.add_handler(CommandHandler("rawfixtures",    rawfixtures_command))
+        application.add_handler(CommandHandler("debugtomorrow",  debugtomorrow_command))
+        application.add_handler(CommandHandler("debugyesterday", debugyesterday_command))
+        application.add_handler(CommandHandler("health",         health_command))
 
         update = Update.de_json(update_data, application.bot)
         await application.process_update(update)
@@ -455,4 +584,5 @@ def run_daily():
     """
     run_analysis()
     return f"✅ Analysis complete: {daily_results[:80] if daily_results else 'No results'}", 200
+
 
