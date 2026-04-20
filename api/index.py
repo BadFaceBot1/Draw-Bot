@@ -552,7 +552,7 @@ def webhook():
     if not data:
         return "Bad request", 400
     asyncio.run(process_update(data))
-    return "ok", 200
+    return "Webhook received", 200
 
 
 @app.route("/api/set_webhook", methods=["GET"])
@@ -584,5 +584,3 @@ def run_daily():
     """
     run_analysis()
     return f"✅ Analysis complete: {daily_results[:80] if daily_results else 'No results'}", 200
-
-
