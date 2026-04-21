@@ -15,10 +15,9 @@ app = Flask(__name__)
 # 2. Environment Variables & Constants
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPORTMONKS_API_KEY = os.getenv("SPORTMONKS_API_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 BASE_URL = "https://api.sportmonks.com/v3/football"
 
-if not TELEGRAM_TOKEN or not SPORTMONKS_API_KEY or not WEBHOOK_URL:
+if not TELEGRAM_TOKEN or not SPORTMONKS_API_KEY:
     print("CRITICAL: Missing environment variables")
 
 ALLOWED_LEAGUES = [
@@ -204,7 +203,7 @@ def webhook():
         update = Update.de_json(data, telegram_app.bot)
         asyncio.run(telegram_app.process_update(update))
         
-        # IMPORTANT: Return empty JSON response (Telegram expects this)
+        # Return empty JSON response (Telegram expects this)
         return jsonify({}), 200
         
     except Exception as e:
@@ -213,26 +212,21 @@ def webhook():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/webhook-status", methods=["GET"])
-def webhook_status():
-    """Check webhook status"""
-    return jsonify({"status": "running", "webhook_url": WEBHOOK_URL}), 200
-
 # 8. Setup webhook on startup
 async def setup_webhook():
     """Register webhook with Telegram on startup"""
-    if not WEBHOOK_URL:
-        print("[ERROR] WEBHOOK_URL not set!")
-        return
-    
     try:
+        # Get the Vercel deployment domain from Vercel headers or use a fallback
+        # For Vercel, the URL will be automatically detected
+        webhook_url = "https://BadFaceBot1.vercel.app/api/webhook"  # Update this with your actual Vercel URL
+        
         # Delete old webhook first
         await telegram_app.bot.delete_webhook(drop_pending_updates=True)
         print("✅ Old webhook deleted")
         
         # Set new webhook
-        await telegram_app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=["message", "channel_post"])
-        print(f"✅ Webhook set to: {WEBHOOK_URL}")
+        await telegram_app.bot.set_webhook(url=webhook_url, allowed_updates=["message", "channel_post"])
+        print(f"✅ Webhook set to: {webhook_url}")
         
         # Verify
         info = await telegram_app.bot.get_webhook_info()
@@ -245,6 +239,5 @@ async def setup_webhook():
 
 # Run setup on startup
 if __name__ == "__main__":
-    print(f"Starting bot with WEBHOOK_URL: {WEBHOOK_URL}")
     asyncio.run(setup_webhook())
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
