@@ -14,7 +14,7 @@ app = Flask(__name__)
 # 2. Environment Variables & Constants
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPORTMONKS_API_KEY = os.getenv("SPORTMONKS_API_KEY")
-BASE_URL = "https://api.sportmonks.com/v3/football"
+BASE_URL = "https://api.sportmonks.com/v3/"
 
 if not TELEGRAM_TOKEN or not SPORTMONKS_API_KEY:
     # We print this so it shows up in Vercel logs for debugging
