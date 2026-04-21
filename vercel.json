@@ -1,19 +1,19 @@
 {
-  "buildCommand": "pip install -r requirements.txt",
-  "functions": {
-    "api/*.py": {
-      "runtime": "python3.9"
-    }
-  },
-  "rewrites": [
+  "version": 2,
+  "builds": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index.py"
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
     }
   ],
   "env": {
     "TELEGRAM_TOKEN": "@TELEGRAM_TOKEN",
-    "SPORTMONKS_API_KEY": "@SPORTMONKS_API_KEY",
-    "WEBHOOK_URL": "@WEBHOOK_URL"
+    "SPORTMONKS_API_KEY": "@SPORTMONKS_API_KEY"
   }
 }
