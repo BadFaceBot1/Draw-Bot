@@ -70,14 +70,13 @@ daily_results = None
 
 telegram_app = None
 
-
 def get_telegram_app():
+    """Get or create the persistent Telegram application"""
     global telegram_app
     if telegram_app is None:
         telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
         _register_handlers(telegram_app)
     return telegram_app
-
 
 def _register_handlers(app_instance):
     """Register all command handlers"""
@@ -88,11 +87,9 @@ def _register_handlers(app_instance):
     app_instance.add_handler(CommandHandler("rawfixtures", rawfixtures_command))
     app_instance.add_handler(CommandHandler("health", health_command))
 
-
 # ─────────────────────────────────────────
 # 7. SPORTMONKS API HELPERS
 # ─────────────────────────────────────────
-
 
 def _sm_get(path, extra_params=None, timeout=7):
     """Single wrapper for all SportMonks GET requests."""
@@ -157,7 +154,6 @@ def _detail_value(details, type_id, default=0):
 # 8. API FUNCTIONS
 # ─────────────────────────────────────────
 
-
 def get_matches_by_date(date_str):
     """Fetch fixtures for a date and filter to allowed leagues."""
     print(f"[INFO] Fetching fixtures for: {date_str}")
@@ -184,6 +180,10 @@ def get_standings_by_season(season_id):
     """
     Fetch league standings for a SportMonks season_id.
     Returns dict mapping team_id → stats, or None on failure.
+
+    SportMonks standings detail type_ids:
+      129 = played, 130 = wins, 131 = draws, 132 = losses,
+      133 = goals_for, 134 = goals_against, 179 = goal_difference
     """
     key = str(season_id)
     if key in standings_cache:
@@ -274,7 +274,6 @@ def get_h2h(home_id, away_id):
 # 9. SCORING FUNCTION
 # ─────────────────────────────────────────
 
-
 def calculate_draw_score(home, away, form_h, form_a, h2h):
     score = 0
 
@@ -310,7 +309,6 @@ def calculate_draw_score(home, away, form_h, form_a, h2h):
 # 10. ANALYSIS FUNCTION
 # ─────────────────────────────────────────
 
-
 def run_analysis():
     global daily_results
 
@@ -338,7 +336,7 @@ def run_analysis():
                 continue
 
             form_h = get_recent_form(home_id)
-            time.sleep(0.1)  # Reduced from 0.5
+            time.sleep(0.1)
             form_a = get_recent_form(away_id)
             time.sleep(0.1)
             h2h = get_h2h(home_id, away_id)
@@ -500,7 +498,6 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 12. FLASK ROUTES
 # ─────────────────────────────────────────
 
-
 @app.route("/")
 def home():
     return "Bot is alive!", 200
@@ -514,19 +511,14 @@ def webhook():
         if not data:
             return "Bad request", 400
         
-        # Process update asynchronously
-        asyncio.run(_process_update_async(data))
+        # Use persistent app instance
+        app_instance = get_telegram_app()
+        update = Update.de_json(data, app_instance.bot)
+        asyncio.run(app_instance.process_update(update))
         return "OK", 200
     except Exception as e:
         print(f"[ERROR] Webhook error: {e}")
         return "Error", 500
-
-
-async def _process_update_async(update_data: dict):
-    """Process update using persistent telegram_app"""
-    app_instance = get_telegram_app()
-    update = Update.de_json(update_data, app_instance.bot)
-    await app_instance.process_update(update)
 
 
 @app.route("/api/set_webhook", methods=["GET"])
@@ -550,6 +542,7 @@ def set_webhook():
         webhook_url = asyncio.run(_set())
         return f"✅ Webhook set to: {webhook_url}/api/webhook", 200
     except Exception as e:
+        print(f"[ERROR] set_webhook error: {e}")
         return f"❌ Error: {e}", 500
 
 
@@ -561,8 +554,10 @@ def run_daily():
     """
     try:
         run_analysis()
-        return f"✅ Analysis complete. {len(daily_results) if daily_results else 0} chars", 200
+        result_preview = daily_results[:80] if daily_results else 'No results'
+        return f"✅ Analysis complete: {result_preview}", 200
     except Exception as e:
+        print(f"[ERROR] run_daily error: {e}")
         return f"❌ Error: {e}", 500
 
 
