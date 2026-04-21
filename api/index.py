@@ -42,24 +42,36 @@ HEADERS = {
 # so we filter by league name instead.
 # ─────────────────────────────────────────
 
-ALLOWED_LEAGUE_NAMES = {
-    "Brazil Serie B",
-    "Brazil Serie C",
-    "Argentina Primera Nacional",
-    "Colombia Primera B",
-    "Mexico Expansion MX",
-    "Chile Primera B",
-    "Peru Liga 2",
-    "Paraguay Intermedia",
-    "Uruguay Segunda Division",
-    "Sweden Superettan",
-    "Norway OBOS Ligaen",
-    "Finland Ykkonen",
-    "Denmark Division 1",
-    "Netherlands Eerste Divisie",
-    "Germany 3. Liga",
+ALLOWED_LEAGUES = {
+    # Italy
+    387: "Serie B (Italy)",
+    781:  "Serie C (Italy)",
+    # Spain
+    567: "Segunda Division (Spain)",
+    # France
+    302: "Ligue 2 (France)",
+    # Netherlands
+    639: "Eerste Divisie (Netherlands)",
+    # Germany
+    85: "3. Liga (Germany)",
+    # Portugal
+    490: "Liga 2 (Portugal)",
+    # Poland
+    483: "I Liga (Poland)",
+    # Czech Republic
+    244: "FNL (Czech Republic)",
+    # Turkey
+    603: "1. Lig (Turkey)",
+    # England
+    20:  "League One (England)",
+    # Sweden
+    465: "Superettan (Sweden)",
+    # Norway
+    447: "OBOS Ligaen (Norway)",
+    # Denmark
+    274: "Division 1 (Denmark)",
+    
 }
-
 # ─────────────────────────────────────────
 # 5. IN-MEMORY CACHE
 # ─────────────────────────────────────────
