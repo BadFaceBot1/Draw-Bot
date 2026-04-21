@@ -1,23 +1,5 @@
 {
-  "routes": [
-    {
-      "src": "/api/webhook",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/api/set_webhook",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/api/run_daily",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/",
-      "dest": "/api/index.py"
-    }
-  ],
-  "crons": [
-    { "path": "/api/run_daily", "schedule": "5 0 * * *" }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.py" }
   ]
 }
