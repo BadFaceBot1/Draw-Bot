@@ -1,25 +1,23 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "api/index.py",
-      "use": "@vercel/python"
-    }
-  ],
   "routes": [
     {
-      "src": "/(.*)",
-      "dest": "api/index.py"
+      "src": "/api/webhook",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/api/set_webhook",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/api/run_daily",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/",
+      "dest": "/api/index.py"
     }
   ],
-  "env": {
-    "TELEGRAM_TOKEN": "@TELEGRAM_TOKEN",
-    "SPORTMONKS_API_KEY": "@SPORTMONKS_API_KEY"
-  },
   "crons": [
-    {
-      "path": "/api/run_daily",
-      "schedule": "5 0 * * *"
-    }
+    { "path": "/api/run_daily", "schedule": "5 0 * * *" }
   ]
 }
