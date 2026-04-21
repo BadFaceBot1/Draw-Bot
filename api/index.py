@@ -19,20 +19,18 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # 1. ENVIRONMENT
 # ---------------------------------------------------------
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-RAPIDAPI_KEY   = os.getenv("RAPIDAPI_KEY")
+TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN")
+API_FOOTBALL_KEY  = os.getenv("API_FOOTBALL_KEY") or os.getenv("RAPIDAPI_KEY")
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN environment variable is not set.")
-if not RAPIDAPI_KEY:
-    raise RuntimeError("RAPIDAPI_KEY environment variable is not set.")
+if not API_FOOTBALL_KEY:
+    raise RuntimeError("API_FOOTBALL_KEY environment variable is not set.")
 
-RAPIDAPI_HOST = "free-api-live-football-data.p.rapidapi.com"
-BASE_URL      = f"https://{RAPIDAPI_HOST}"
+BASE_URL = "https://v3.football.api-sports.io"
 
 HEADERS = {
-    "x-rapidapi-key":  RAPIDAPI_KEY,
-    "x-rapidapi-host": RAPIDAPI_HOST,
+    "x-apisports-key": API_FOOTBALL_KEY,
 }
 
 
@@ -222,7 +220,7 @@ def get_h2h(home_id, away_id):
     if cached is not None:
         return cached
 
-    data = _api_get("/headtohead", {"h2h": f"{home_id}-{away_id}", "last": 5})
+    data = _api_get("/fixtures/headtohead", {"h2h": f"{home_id}-{away_id}", "last": 5})
     if not data:
         return None
     fixtures = data.get("response", []) or []
