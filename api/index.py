@@ -32,9 +32,14 @@ if not SPORTMONKS_API_KEY:
     raise RuntimeError("SPORTMONKS_API_KEY environment variable is not set.")
 
 BASE_URL = "https://api.sportmonks.com/v3/football"
+HEADERS = {
+    "Authorization": SPORTMONKS_API_KEY,
+}
 
 # ─────────────────────────────────────────
 # 4. ALLOWED LEAGUE NAMES
+# SportMonks IDs differ from API-Football,
+# so we filter by league name instead.
 # ─────────────────────────────────────────
 
 ALLOWED_LEAGUE_NAMES = {
@@ -65,31 +70,9 @@ h2h_cache = {}
 daily_results = None
 
 # ─────────────────────────────────────────
-# 6. GLOBAL TELEGRAM APP (PERSISTENT)
+# 6. SPORTMONKS API HELPERS
 # ─────────────────────────────────────────
 
-telegram_app = None
-
-def get_telegram_app():
-    """Get or create the persistent Telegram application"""
-    global telegram_app
-    if telegram_app is None:
-        telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-        _register_handlers(telegram_app)
-    return telegram_app
-
-def _register_handlers(app_instance):
-    """Register all command handlers"""
-    app_instance.add_handler(CommandHandler("start", start_command))
-    app_instance.add_handler(CommandHandler("strongdraws", strongdraws_command))
-    app_instance.add_handler(CommandHandler("testdraws", testdraws_command))
-    app_instance.add_handler(CommandHandler("debugmatches", debugmatches_command))
-    app_instance.add_handler(CommandHandler("rawfixtures", rawfixtures_command))
-    app_instance.add_handler(CommandHandler("health", health_command))
-
-# ─────────────────────────────────────────
-# 7. SPORTMONKS API HELPERS
-# ─────────────────────────────────────────
 
 def _sm_get(path, extra_params=None, timeout=7):
     """Single wrapper for all SportMonks GET requests."""
@@ -99,6 +82,7 @@ def _sm_get(path, extra_params=None, timeout=7):
     try:
         r = requests.get(
             f"{BASE_URL}{path}",
+            headers=HEADERS,
             params=params,
             timeout=timeout,
         )
@@ -151,8 +135,9 @@ def _detail_value(details, type_id, default=0):
 
 
 # ─────────────────────────────────────────
-# 8. API FUNCTIONS
+# 7. API FUNCTIONS
 # ─────────────────────────────────────────
+
 
 def get_matches_by_date(date_str):
     """Fetch fixtures for a date and filter to allowed leagues."""
@@ -271,8 +256,9 @@ def get_h2h(home_id, away_id):
 
 
 # ─────────────────────────────────────────
-# 9. SCORING FUNCTION
+# 8. SCORING FUNCTION  (unchanged)
 # ─────────────────────────────────────────
+
 
 def calculate_draw_score(home, away, form_h, form_a, h2h):
     score = 0
@@ -306,8 +292,9 @@ def calculate_draw_score(home, away, form_h, form_a, h2h):
 
 
 # ─────────────────────────────────────────
-# 10. ANALYSIS FUNCTION
+# 9. ANALYSIS FUNCTION
 # ─────────────────────────────────────────
+
 
 def run_analysis():
     global daily_results
@@ -336,11 +323,11 @@ def run_analysis():
                 continue
 
             form_h = get_recent_form(home_id)
-            time.sleep(0.1)
+            time.sleep(0.5)
             form_a = get_recent_form(away_id)
-            time.sleep(0.1)
+            time.sleep(0.5)
             h2h = get_h2h(home_id, away_id)
-            time.sleep(0.1)
+            time.sleep(0.5)
 
             score = calculate_draw_score(home, away, form_h, form_a, h2h)
 
@@ -376,7 +363,7 @@ def run_analysis():
 
 
 # ─────────────────────────────────────────
-# 11. TELEGRAM COMMAND HANDLERS
+# 10. TELEGRAM COMMAND HANDLERS
 # ─────────────────────────────────────────
 
 BOT_COMMANDS = [
@@ -495,8 +482,27 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────
+# 11. CORE UPDATE PROCESSOR
+# ─────────────────────────────────────────
+
+
+async def process_update(update_data: dict):
+    async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
+        application.add_handler(CommandHandler("start",        start_command))
+        application.add_handler(CommandHandler("strongdraws",  strongdraws_command))
+        application.add_handler(CommandHandler("testdraws",    testdraws_command))
+        application.add_handler(CommandHandler("debugmatches", debugmatches_command))
+        application.add_handler(CommandHandler("rawfixtures",  rawfixtures_command))
+        application.add_handler(CommandHandler("health",       health_command))
+
+        update = Update.de_json(update_data, application.bot)
+        await application.process_update(update)
+
+
+# ─────────────────────────────────────────
 # 12. FLASK ROUTES
 # ─────────────────────────────────────────
+
 
 @app.route("/")
 def home():
@@ -505,45 +511,29 @@ def home():
 
 @app.route("/api/webhook", methods=["POST"])
 def webhook():
-    """Handle incoming Telegram updates"""
-    try:
-        data = flask_request.get_json(force=True)
-        if not data:
-            return "Bad request", 400
-        
-        # Use persistent app instance
-        app_instance = get_telegram_app()
-        update = Update.de_json(data, app_instance.bot)
-        asyncio.run(app_instance.process_update(update))
-        return "OK", 200
-    except Exception as e:
-        print(f"[ERROR] Webhook error: {e}")
-        return "Error", 500
+    data = flask_request.get_json(force=True)
+    if not data:
+        return "Bad request", 400
+    asyncio.run(process_update(data))
+    return "Webhook received", 200
 
 
 @app.route("/api/set_webhook", methods=["GET"])
 def set_webhook():
     """
     Call once after deploying to register the webhook with Telegram.
-    Example: GET https://your-vercel-app.vercel.app/api/set_webhook?url=https://your-vercel-app.vercel.app
+    Example: GET https://your-vercel-app.vercel.app/api/set_webhook
     """
-    try:
-        # Get URL from query parameter (safer than flask_request.host_url)
-        webhook_url = flask_request.args.get("url")
-        if not webhook_url:
-            return "❌ Missing 'url' query parameter. Example: ?url=https://your-domain.com", 400
-
-        async def _set():
-            app_instance = get_telegram_app()
-            await app_instance.bot.set_my_commands(BOT_COMMANDS)
-            await app_instance.bot.set_webhook(url=f"{webhook_url}/api/webhook")
+    async def _set():
+        async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
+            await application.bot.set_my_commands(BOT_COMMANDS)
+            domain = flask_request.host_url.rstrip("/")
+            webhook_url = f"{domain}/api/webhook"
+            await application.bot.set_webhook(url=webhook_url)
             return webhook_url
 
-        webhook_url = asyncio.run(_set())
-        return f"✅ Webhook set to: {webhook_url}/api/webhook", 200
-    except Exception as e:
-        print(f"[ERROR] set_webhook error: {e}")
-        return f"❌ Error: {e}", 500
+    webhook_url = asyncio.run(_set())
+    return f"✅ Webhook set to: {webhook_url}", 200
 
 
 @app.route("/api/run_daily", methods=["GET", "POST"])
@@ -552,20 +542,5 @@ def run_daily():
     Trigger via Vercel Cron at 00:05 UTC daily.
     vercel.json: {"crons": [{"path": "/api/run_daily", "schedule": "5 0 * * *"}]}
     """
-    try:
-        run_analysis()
-        result_preview = daily_results[:80] if daily_results else 'No results'
-        return f"✅ Analysis complete: {result_preview}", 200
-    except Exception as e:
-        print(f"[ERROR] run_daily error: {e}")
-        return f"❌ Error: {e}", 500
-
-
-# ─────────────────────────────────────────
-# 13. ENTRY POINT (for local testing)
-# ─────────────────────────────────────────
-
-if __name__ == "__main__":
-    print("🤖 Bot starting...")
-    get_telegram_app()  # Initialize app on startup
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
+    run_analysis()
+    return f"✅ Analysis complete: {daily_results[:80] if daily_results else 'No results'}", 200
