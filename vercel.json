@@ -15,5 +15,11 @@
   "env": {
     "TELEGRAM_TOKEN": "@TELEGRAM_TOKEN",
     "SPORTMONKS_API_KEY": "@SPORTMONKS_API_KEY"
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/run_daily",
+      "schedule": "5 0 * * *"
+    }
+  ]
 }
