@@ -1,8 +1,3 @@
-─────────────────────────────────────────
-IMPORTS
-
-─────────────────────────────────────────
-
 import os
 import time
 import asyncio
@@ -10,429 +5,164 @@ import requests
 from datetime import datetime
 
 from flask import Flask, request as flask_request
-from telegram import Update, BotCommand
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-─────────────────────────────────────────
-FLASK APP
-
-─────────────────────────────────────────
-
-from flask import Flask
+# 1. Initialize Flask
 app = Flask(__name__)
 
-@app.route('/')
-def hello():
-    return "Hello from Vercel!"
-
-─────────────────────────────────────────
-ENVIRONMENT VARIABLES
-
-─────────────────────────────────────────
-
+# 2. Environment Variables & Constants
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPORTMONKS_API_KEY = os.getenv("SPORTMONKS_API_KEY")
-
-if not TELEGRAM_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN not set.")
-
-if not SPORTMONKS_API_KEY:
-    raise RuntimeError("SPORTMONKS_API_KEY not set.")
-
 BASE_URL = "https://api.sportmonks.com/v3/football"
 
-─────────────────────────────────────────
-TARGET LEAGUES (FIXED SAFE FILTER)
-
-─────────────────────────────────────────
+if not TELEGRAM_TOKEN or not SPORTMONKS_API_KEY:
+    # We print this so it shows up in Vercel logs for debugging
+    print("CRITICAL: Missing environment variables")
 
 ALLOWED_LEAGUES = [
-    ("Italy", "Serie B"),
-    ("Italy", "Serie C"),
-    ("Spain", "Segunda Division"),
-    ("France", "Ligue 2"),
-    ("Netherlands", "Eerste Divisie"),
-    ("Germany", "3. Liga"),
-    ("Portugal", "Liga 2"),
-    ("Romania", "Liga II"),
-    ("Poland", "I Liga"),
-    ("Czech Republic", "FNL"),
-    ("Turkey", "1. Lig"),
-    ("England", "League One"),
-    ("Sweden", "Superettan"),
-    ("Norway", "OBOS Ligaen"),
-    ("Denmark", "Division 1"),
-    ("Argentina", "Primera Nacional"),
-    ("Greece", "Super League 2"),
-    ("Uruguay", "Segunda Division"),
-    ("Paraguay", "Division Intermedia"),
+    ("Italy", "Serie B"), ("Italy", "Serie C"), ("Spain", "Segunda Division"),
+    ("France", "Ligue 2"), ("Netherlands", "Eerste Divisie"), ("Germany", "3. Liga"),
+    ("Portugal", "Liga 2"), ("Romania", "Liga II"), ("Poland", "I Liga"),
+    ("Czech Republic", "FNL"), ("Turkey", "1. Lig"), ("England", "League One"),
+    ("Sweden", "Superettan"), ("Norway", "OBOS Ligaen"), ("Denmark", "Division 1"),
+    ("Argentina", "Primera Nacional"), ("Greece", "Super League 2"),
+    ("Uruguay", "Segunda Division"), ("Paraguay", "Division Intermedia"),
     ("Finland", "Ykkonen")
 ]
 
-─────────────────────────────────────────
-CACHE
-
-─────────────────────────────────────────
-
+# 3. Cache & Globals
 standings_cache = {}
 daily_results = None
 
-─────────────────────────────────────────
-API WRAPPER
+# 4. Telegram Bot Setup
+telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-─────────────────────────────────────────
-
+# 5. Helper Functions
 def _sm_get(path, params=None):
-    if params is None:
-        params = {}
-
+    if params is None: params = {}
     params["api_token"] = SPORTMONKS_API_KEY
-
     try:
-        r = requests.get(
-            f"{BASE_URL}{path}",
-            params=params,
-            timeout=7
-        )
-
-        if r.status_code != 200:
-            print("[SportMonks Error]", r.status_code)
-            return None
-
-        return r.json()
-
+        r = requests.get(f"{BASE_URL}{path}", params=params, timeout=7)
+        return r.json() if r.status_code == 200 else None
     except Exception as e:
-        print("[ERROR API]", e)
+        print(f"[ERROR API] {e}")
         return None
 
-─────────────────────────────────────────
-TEAM EXTRACTION
-
-─────────────────────────────────────────
-
 def _extract_teams(fixture):
-    home_id = None
-    away_id = None
-    home_name = None
-    away_name = None
-
+    home_id, away_id, home_name, away_name = None, None, None, None
     for p in fixture.get("participants", []):
-        location = p.get("meta", {}).get("location")
-
-        if location == "home":
-            home_id = p.get("id")
-            home_name = p.get("name")
-
-        elif location == "away":
-            away_id = p.get("id")
-            away_name = p.get("name")
-
+        loc = p.get("meta", {}).get("location")
+        if loc == "home":
+            home_id, home_name = p.get("id"), p.get("name")
+        elif loc == "away":
+            away_id, away_name = p.get("id"), p.get("name")
     return home_id, away_id, home_name, away_name
-
-─────────────────────────────────────────
-MATCH FETCH (FIXED FILTER)
-
-─────────────────────────────────────────
-
-def get_matches_by_date(date_str):
-    data = _sm_get(
-        f"/fixtures/date/{date_str}",
-        {"include": "league;participants"}
-    )
-
-    if not data:
-        return []
-
-    raw = data.get("data", [])
-    filtered = []
-
-    for f in raw:
-        league_data = f.get("league", {})
-        league_name = league_data.get("name", "").lower()
-        country_name = (
-            league_data
-            .get("country", {})
-            .get("name", "")
-            .lower()
-        )
-
-        for country, league in ALLOWED_LEAGUES:
-            if (
-                country.lower() in country_name
-                and league.lower() in league_name
-            ):
-                filtered.append(f)
-                break
-
-    print(
-        "[INFO] Raw:",
-        len(raw),
-        "| Filtered:",
-        len(filtered)
-    )
-
-    return filtered
-
-def get_today_matches():
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    return get_matches_by_date(today)
-
-─────────────────────────────────────────
-STANDINGS
-
-─────────────────────────────────────────
 
 def get_standings_by_season(season_id):
     key = str(season_id)
-
-    if key in standings_cache:
-        return standings_cache[key]
-
-    data = _sm_get(
-        f"/standings/seasons/{season_id}",
-        {"include": "participant;details"}
-    )
-
-    if not data:
-        return None
-
-    entries = data.get("data", [])
-
-    if not entries:
-        return None
-
+    if key in standings_cache: return standings_cache[key]
+    data = _sm_get(f"/standings/seasons/{season_id}", {"include": "participant;details"})
+    if not data or not data.get("data"): return None
+    
     result = {}
-
-    for entry in entries:
+    for entry in data.get("data", []):
         team_id = entry.get("participant_id")
-
-        if not team_id:
-            continue
-
+        if not team_id: continue
         details = entry.get("details", [])
-
-        def get_detail(type_id):
+        
+        def get_val(tid):
             for d in details:
-                if d.get("type_id") == type_id:
-                    try:
-                        return int(d.get("value", 0))
-                    except:
-                        return 0
+                if d.get("type_id") == tid:
+                    return int(d.get("value", 0))
             return 0
-
-        played       = get_detail(45)
-        wins         = get_detail(46)
-        draws        = get_detail(47)
-        losses       = get_detail(48)
-        goals_for    = get_detail(52)
-        goals_against = get_detail(53)
-
-        if played == 0:
-            played = max(wins + draws + losses, 1)
-
-        goal_diff = goals_for - goals_against
-
+            
+        wins, draws, losses = get_val(46), get_val(47), get_val(48)
+        played = max(wins + draws + losses, 1)
+        gf, ga = get_val(52), get_val(53)
+        
         result[team_id] = {
-            "rank":           entry.get("position", 99),
-            "played":         played,
-            "draws":          draws,
-            "goals_for":      goals_for,
-            "goals_against":  goals_against,
-            "goal_diff":      goal_diff
+            "rank": entry.get("position", 99),
+            "played": played,
+            "draws": draws,
+            "goals_for": gf,
+            "goals_against": ga,
+            "goal_diff": gf - ga
         }
-
-        print(
-            f"[STANDINGS] Team {team_id} | "
-            f"Rank {entry.get('position')} | "
-            f"P{played} W{wins} D{draws} L{losses} "
-            f"GF{goals_for} GA{goals_against}"
-        )
-
     standings_cache[key] = result
-
     return result
-
-─────────────────────────────────────────
-SCORING
-
-─────────────────────────────────────────
-
-def calculate_draw_score(home, away):
-    score = 0
-    gap = abs(home["rank"] - away["rank"])
-
-    if gap >= 0.30:
-        score += 3
-
-    elif gap >= 0.25:
-        score += 2
-
-    return score
-
-─────────────────────────────────────────
-ANALYSIS (FIXED SEASON FALLBACK)
-
-─────────────────────────────────────────
 
 def run_analysis():
     global daily_results
-
-    matches = get_today_matches()
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    data = _sm_get(f"/fixtures/date/{today}", {"include": "league;participants"})
+    if not data: return
+    
     candidates = []
-
-    for game in matches:
-        season_id = game.get("season_id")
-
-        if not season_id:
-            season_id = (
-                game
-                .get("league", {})
-                .get("season_id")
-            )
-
-        if not season_id:
-            continue
-
-        home_id, away_id, home_name, away_name = (
-            _extract_teams(game)
-        )
-
-        standings = get_standings_by_season(
-            season_id
-        )
-
-        if not standings:
-            continue
-
-        home = standings.get(home_id)
-        away = standings.get(away_id)
-
-        if not home or not away:
-            continue
-
-        score = calculate_draw_score(
-            home,
-            away
-        )
-
-        if score >= 7:
-            candidates.append({
-                "match":
-                    f"{home_name} vs {away_name}",
-                "league":
-                    game.get("league", {}).get("name"),
-                "score":
-                    score
-            })
-
-        time.sleep(0.4)
+    for game in data.get("data", []):
+        league_data = game.get("league", {})
+        l_name, c_name = league_data.get("name", "").lower(), league_data.get("country", {}).get("name", "").lower()
+        
+        match_league = False
+        for country, league in ALLOWED_LEAGUES:
+            if country.lower() in c_name and league.lower() in l_name:
+                match_league = True
+                break
+        
+        if not match_league: continue
+        
+        season_id = game.get("season_id") or league_data.get("season_id")
+        if not season_id: continue
+        
+        h_id, a_id, h_name, a_name = _extract_teams(game)
+        st = get_standings_by_season(season_id)
+        if not st: continue
+        
+        home, away = st.get(h_id), st.get(a_id)
+        if not home or not away: continue
+        
+        # Scoring Logic
+        gap = abs(home["rank"] - away["rank"])
+        score = 3 if gap >= 0.30 else (2 if gap >= 0.25 else 0)
+        
+        if score >= 2: # Adjusted threshold for testing
+            candidates.append({"match": f"{h_name} vs {a_name}", "league": league_data.get("name"), "score": score})
+        time.sleep(0.1)
 
     if not candidates:
-        daily_results = (
-            "⚽ No strong draw candidates found today."
-        )
-        return
+        daily_results = "⚽ No strong draw candidates found today."
+    else:
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        msg = "🎯 Today's Draw Picks:\n\n"
+        for i, c in enumerate(candidates[:3], 1):
+            msg += f"{i}) {c['match']}\n🏆 {c['league']}\n⭐ Score: {c['score']}\n\n"
+        daily_results = msg
 
-    candidates.sort(
-        key=lambda x: x["score"],
-        reverse=True
-    )
-
-    msg = "🎯 Today's Strong Draw Picks:\n\n"
-
-    for i, c in enumerate(
-        candidates[:3],
-        1
-    ):
-        msg += (
-            f"{i}) {c['match']}\n"
-            f"🏆 {c['league']}\n"
-            f"⭐ Score: {c['score']}/10\n\n"
-        )
-
-    daily_results = msg
-
-─────────────────────────────────────────
-TELEGRAM COMMANDS
-
-─────────────────────────────────────────
-
+# 6. Telegram Handlers
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ Bot running.\nUse /testdraws"
-    )
+    await update.message.reply_text("✅ Bot running. Use /testdraws")
 
 async def strongdraws_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if daily_results:
-        await update.message.reply_text(
-            daily_results
-        )
-    else:
-        await update.message.reply_text(
-            "No results yet. Run /testdraws"
-        )
+    await update.message.reply_text(daily_results or "No results. Run /testdraws")
 
 async def testdraws_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Running analysis..."
-    )
-
+    await update.message.reply_text("Running analysis...")
     run_analysis()
+    await update.message.reply_text(daily_results)
 
-    await update.message.reply_text(
-        daily_results
-    )
+telegram_app.add_handler(CommandHandler("start", start_command))
+telegram_app.add_handler(CommandHandler("strongdraws", strongdraws_command))
+telegram_app.add_handler(CommandHandler("testdraws", testdraws_command))
 
-─────────────────────────────────────────
-TELEGRAM APP (FIXED GLOBAL)
-
-─────────────────────────────────────────
-
-telegram_app = Application.builder().token(
-    TELEGRAM_TOKEN
-).build()
-
-telegram_app.add_handler(
-    CommandHandler("start", start_command)
-)
-
-telegram_app.add_handler(
-    CommandHandler("strongdraws", strongdraws_command)
-)
-
-telegram_app.add_handler(
-    CommandHandler("testdraws", testdraws_command)
-)
-
-async def process_update(update_data):
-    update = Update.de_json(
-        update_data,
-        telegram_app.bot
-    )
-
-    await telegram_app.process_update(update)
-
-─────────────────────────────────────────
-FLASK ROUTES
-
-─────────────────────────────────────────
-
+# 7. Flask Routes
 @app.route("/")
 def home():
     return "Bot is alive!", 200
 
 @app.route("/api/webhook", methods=["POST"])
 def webhook():
-    data = flask_request.get_json(force=True)
-
-    asyncio.run(
-        process_update(data)
-    )
-
-    return "OK", 200
-
-@app.route("/api/run_daily")
-def run_daily():
-    run_analysis()
-
-    return "Daily analysis complete"
+    if flask_request.method == "POST":
+        update = Update.de_json(flask_request.get_json(force=True), telegram_app.bot)
+        asyncio.run(telegram_app.process_update(update))
+        return "OK", 200
+    return "Invalid", 400
