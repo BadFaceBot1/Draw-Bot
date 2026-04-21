@@ -1,10 +1,11 @@
 import os
 import time
 import asyncio
+import json
 import requests
 from datetime import datetime
 
-from flask import Flask, request as flask_request
+from flask import Flask, request as flask_request, jsonify
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -14,15 +15,11 @@ app = Flask(__name__)
 # 2. Environment Variables & Constants
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPORTMONKS_API_KEY = os.getenv("SPORTMONKS_API_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 BASE_URL = "https://api.sportmonks.com/v3/football"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g., https://yourdomain.com/api/webhook
 
-if not TELEGRAM_TOKEN or not SPORTMONKS_API_KEY:
+if not TELEGRAM_TOKEN or not SPORTMONKS_API_KEY or not WEBHOOK_URL:
     print("CRITICAL: Missing environment variables")
-    exit(1)
-
-if not WEBHOOK_URL:
-    print("WARNING: WEBHOOK_URL not set. Webhook registration will be skipped.")
 
 ALLOWED_LEAGUES = [
     ("Italy", "Serie B"), ("Italy", "Serie C"), ("Spain", "Segunda Division"),
@@ -141,14 +138,11 @@ def run_analysis():
         if not home or not away:
             continue
         
-        # FIXED: Better scoring logic for draw candidates
-        # Prefer teams with similar standings and high draw rates
         rank_gap = abs(home["rank"] - away["rank"])
         home_draw_rate = home["draws"] / max(home["played"], 1)
         away_draw_rate = away["draws"] / max(away["played"], 1)
         avg_draw_rate = (home_draw_rate + away_draw_rate) / 2
         
-        # Score based on: small rank gap + high draw rate in league
         score = 0
         if rank_gap <= 3:
             score += 2
@@ -159,7 +153,7 @@ def run_analysis():
         if avg_draw_rate >= 0.20:
             score += 1
         
-        if score >= 3:  # Adjusted threshold
+        if score >= 3:
             candidates.append({
                 "match": f"{h_name} vs {a_name}",
                 "league": league_data.get("name"),
@@ -187,45 +181,70 @@ async def strongdraws_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def testdraws_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Running analysis...")
-    # Run analysis in thread pool to avoid blocking
     await asyncio.to_thread(run_analysis)
     await update.message.reply_text(daily_results or "Analysis complete but no candidates found.")
 
+# Add handlers
 telegram_app.add_handler(CommandHandler("start", start_command))
 telegram_app.add_handler(CommandHandler("strongdraws", strongdraws_command))
 telegram_app.add_handler(CommandHandler("testdraws", testdraws_command))
 
 # 7. Flask Routes
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
     return "Bot is alive!", 200
 
 @app.route("/api/webhook", methods=["POST"])
 def webhook():
-    if flask_request.method == "POST":
-        try:
-            update = Update.de_json(flask_request.get_json(force=True), telegram_app.bot)
-            asyncio.run(telegram_app.process_update(update))
-            return "OK", 200
-        except Exception as e:
-            print(f"[ERROR Webhook] {e}")
-            return "Error", 500
-    return "Invalid method", 400
+    """Handle incoming Telegram updates"""
+    try:
+        data = flask_request.get_json(force=True)
+        print(f"[DEBUG] Received update: {data}")
+        
+        update = Update.de_json(data, telegram_app.bot)
+        asyncio.run(telegram_app.process_update(update))
+        
+        # IMPORTANT: Return empty JSON response (Telegram expects this)
+        return jsonify({}), 200
+        
+    except Exception as e:
+        print(f"[ERROR Webhook] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
-# 8. Startup: Register webhook with Telegram
+@app.route("/api/webhook-status", methods=["GET"])
+def webhook_status():
+    """Check webhook status"""
+    return jsonify({"status": "running", "webhook_url": WEBHOOK_URL}), 200
+
+# 8. Setup webhook on startup
 async def setup_webhook():
-    if WEBHOOK_URL:
-        try:
-            await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
-            print(f"✅ Webhook registered: {WEBHOOK_URL}")
-        except Exception as e:
-            print(f"⚠️ Webhook registration failed: {e}")
-    else:
-        print("⚠️ No WEBHOOK_URL set. Using polling mode (not recommended for production).")
+    """Register webhook with Telegram on startup"""
+    if not WEBHOOK_URL:
+        print("[ERROR] WEBHOOK_URL not set!")
+        return
+    
+    try:
+        # Delete old webhook first
+        await telegram_app.bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Old webhook deleted")
+        
+        # Set new webhook
+        await telegram_app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=["message", "channel_post"])
+        print(f"✅ Webhook set to: {WEBHOOK_URL}")
+        
+        # Verify
+        info = await telegram_app.bot.get_webhook_info()
+        print(f"✅ Webhook verified: {info.url}")
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to set webhook: {e}")
+        import traceback
+        traceback.print_exc()
 
-# Run on startup
+# Run setup on startup
 if __name__ == "__main__":
-    # Register webhook when app starts
+    print(f"Starting bot with WEBHOOK_URL: {WEBHOOK_URL}")
     asyncio.run(setup_webhook())
-    # Start Flask server
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
