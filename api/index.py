@@ -1,6 +1,6 @@
 # =========================================================
 #  TELEGRAM STRONG-DRAW PREDICTOR BOT
-#  Provider : RapidAPI (free-api-live-football-data)
+#  Provider : API-Sports (v3.football.api-sports.io)
 #  Runtime  : Vercel webhook + cron (also runnable locally)
 # =========================================================
 
@@ -35,42 +35,71 @@ HEADERS = {
 
 
 # ---------------------------------------------------------
-# 2. ALLOWED LEAGUES (strict whitelist)
+# 2. ALLOWED LEAGUES (expanded whitelist with display names)
 # ---------------------------------------------------------
 
 ALLOWED_LEAGUES = {
-    137,  # Italy Serie B
-    72,   # Italy Serie C
-    141,  # Spain Segunda Division
-    65,   # France Ligue 2
-    89,   # Netherlands Eerste Divisie
-    78,   # Germany 3. Liga
-    94,   # Portugal Liga 2
-    284,  # Romania Liga II
-    106,  # Poland I Liga
-    345,  # Czech FNL
-    203,  # Turkey 1. Lig
-    41,   # England League One
-    113,  # Sweden Superettan
-    104,  # Norway OBOS Ligaen
-    119,  # Denmark Division 1
-    128,  # Argentina Primera Nacional
-    210,  # Greece Super League 2
-    292,  # Uruguay Segunda Division
-    289,  # Paraguay Division Intermedia
-    244,  # Finland Ykkonen
+    # ITALY
+    137: "Serie B (Italy)",
+    72:  "Serie C (Italy)",
+
+    # SPAIN
+    141: "Segunda Division (Spain)",
+    138: "Primera RFEF (Spain)",
+
+    # FRANCE
+    65:  "Ligue 2 (France)",
+    66:  "National (France)",
+
+    # NETHERLANDS
+    89:  "Eerste Divisie",
+
+    # GERMANY
+    78:  "3. Liga",
+
+    # PORTUGAL
+    94:  "Liga 2",
+
+    # ENGLAND
+    41:  "League One",
+    42:  "League Two",
+
+    # SCANDINAVIA
+    113: "Superettan (Sweden)",
+    104: "OBOS Ligaen (Norway)",
+    119: "Division 1 (Denmark)",
+    244: "Ykkonen (Finland)",
+
+    # EAST EUROPE
+    284: "Liga II (Romania)",
+    106: "I Liga (Poland)",
+    345: "FNL (Czech Republic)",
+    203: "1. Lig (Turkey)",
+    210: "Super League 2 (Greece)",
+
+    # SOUTH AMERICA
+    128: "Primera Nacional (Argentina)",
+    289: "Division Intermedia (Paraguay)",
+    292: "Segunda Division (Uruguay)",
+    239: "Primera B (Colombia)",
+    266: "Primera B (Chile)",
+    281: "Liga 2 (Peru)",
+
+    # BRAZIL
+    71:  "Serie B (Brazil)",
+    73:  "Serie C (Brazil)",
 }
 
 
 # ---------------------------------------------------------
-# 3. CACHING (12-hour TTL)
+# 3. CACHING (12-hour TTL + manual daily reset)
 # ---------------------------------------------------------
 
 CACHE_TTL = 12 * 60 * 60   # 12 hours in seconds
 
-standings_cache = {}   # key -> (timestamp, value)
-form_cache      = {}
-h2h_cache       = {}
+standings_cache = {}   # key: f"{league_id}_{season}"   -> (timestamp, value)
+form_cache      = {}   # key: team_id                   -> (timestamp, value)
+h2h_cache       = {}   # key: f"{home_id}_{away_id}"    -> (timestamp, value)
 
 daily_results = None   # last analysis output
 
@@ -90,12 +119,20 @@ def _cache_set(cache, key, value):
     cache[key] = (time.time(), value)
 
 
+def reset_all_caches():
+    """Daily reset — clears all caches at the start of a new analysis day."""
+    standings_cache.clear()
+    form_cache.clear()
+    h2h_cache.clear()
+    print("[INFO] All caches cleared (daily reset).")
+
+
 # ---------------------------------------------------------
-# 4. API REQUEST HELPER
+# 4. API REQUEST HELPER (rate-limit protected)
 # ---------------------------------------------------------
 
-def _api_get(path, params=None, timeout=8):
-    """Single wrapper for all RapidAPI GET requests."""
+def _api_get(path, params=None, timeout=10):
+    """Single wrapper for all API-Sports GET requests. Always sleeps 0.4s after."""
     try:
         r = requests.get(
             f"{BASE_URL}{path}",
@@ -105,13 +142,20 @@ def _api_get(path, params=None, timeout=8):
         )
         if r.status_code != 200:
             print(f"[API ERROR] {r.status_code} for {path} | params={params}")
+            time.sleep(0.4)
             return None
-        return r.json()
+        data = r.json()
+        if data.get("errors"):
+            print(f"[API ERROR-FIELD] {path} -> {data.get('errors')}")
+        time.sleep(0.4)
+        return data
     except requests.Timeout:
         print(f"[API TIMEOUT] {path}")
+        time.sleep(0.4)
         return None
     except Exception as e:
         print(f"[API ERROR] {path}: {e}")
+        time.sleep(0.4)
         return None
 
 
@@ -128,7 +172,9 @@ def get_matches_by_date(date_str):
     raw = data.get("response", []) or []
     league_ids = sorted({m.get("league", {}).get("id") for m in raw if m.get("league")})
     filtered = [m for m in raw if m.get("league", {}).get("id") in ALLOWED_LEAGUES]
-    print(f"[INFO] Total fixtures: {len(raw)} | Filtered: {len(filtered)} | Leagues seen: {league_ids[:15]}")
+    print(f"Matches fetched: {len(raw)}")
+    print(f"Matches after league filter: {len(filtered)}")
+    print(f"[INFO] League IDs detected (sample): {league_ids[:25]}")
     return filtered
 
 
@@ -138,7 +184,7 @@ def get_today_matches():
 
 
 def get_standings(league_id, season):
-    """Return dict {team_id: stats} or None."""
+    """Return dict {team_id: stats} or None. Cached per (league, season)."""
     key = f"{league_id}_{season}"
     cached = _cache_get(standings_cache, key)
     if cached is not None:
@@ -160,12 +206,12 @@ def get_standings(league_id, season):
         try:
             tid = team["team"]["id"]
             result[tid] = {
-                "rank":         team.get("rank", 99),
-                "played":       team["all"]["played"],
-                "draws":        team["all"]["draw"],
-                "goals_for":    team["all"]["goals"]["for"],
-                "goals_against":team["all"]["goals"]["against"],
-                "goal_diff":    team.get("goalsDiff", 0),
+                "rank":          team.get("rank", 99),
+                "played":        team["all"]["played"],
+                "draws":         team["all"]["draw"],
+                "goals_for":     team["all"]["goals"]["for"],
+                "goals_against": team["all"]["goals"]["against"],
+                "goal_diff":     team.get("goalsDiff", 0),
             }
         except (KeyError, TypeError):
             continue
@@ -175,9 +221,8 @@ def get_standings(league_id, season):
 
 
 def get_recent_form(team_id, league_id, season):
-    """Return list of last-5 results like ['W','D','L',...]."""
-    key = f"{team_id}_{league_id}_{season}"
-    cached = _cache_get(form_cache, key)
+    """Return list of last-5 results like ['W','D','L',...]. Cached per team."""
+    cached = _cache_get(form_cache, team_id)
     if cached is not None:
         return cached
 
@@ -188,7 +233,7 @@ def get_recent_form(team_id, league_id, season):
         "last":   5,
     })
     if not data:
-        _cache_set(form_cache, key, [])
+        _cache_set(form_cache, team_id, [])
         return []
 
     fixtures = data.get("response", []) or []
@@ -209,12 +254,12 @@ def get_recent_form(team_id, league_id, season):
         except (KeyError, TypeError):
             continue
 
-    _cache_set(form_cache, key, results)
+    _cache_set(form_cache, team_id, results)
     return results
 
 
 def get_h2h(home_id, away_id):
-    """Return {'total': n, 'draw_rate': r} or None."""
+    """Return {'total': n, 'draw_rate': r} or None. Cached per pair."""
     key = f"{home_id}_{away_id}"
     cached = _cache_get(h2h_cache, key)
     if cached is not None:
@@ -269,7 +314,7 @@ def passes_filters(home, away, form_h, form_a, h2h):
 
 
 # ---------------------------------------------------------
-# 7. SCORING (max 10 points)
+# 7. SCORING (max 11 points after additions)
 # ---------------------------------------------------------
 
 def calculate_draw_score(home, away, form_h, form_a, h2h):
@@ -282,9 +327,15 @@ def calculate_draw_score(home, away, form_h, form_a, h2h):
     elif gap <= 3:
         score += 2
 
-    # Goal difference similarity
-    if abs(home["goal_diff"] - away["goal_diff"]) <= 5:
+    # Goal-difference similarity
+    gd_diff = abs(home["goal_diff"] - away["goal_diff"])
+    if gd_diff <= 5:
         score += 2
+
+    # Goals-scored similarity (NEW)
+    goals_scored_diff = abs(home["goals_for"] - away["goals_for"])
+    if goals_scored_diff <= 10:
+        score += 1
 
     # Season draw rate
     hr = home["draws"] / max(home["played"], 1)
@@ -307,26 +358,34 @@ def calculate_draw_score(home, away, form_h, form_a, h2h):
 
 
 # ---------------------------------------------------------
-# 8. ANALYSIS  (Top Picks + Backup Picks)
+# 8. ANALYSIS  (Strong Picks ≥7 + Backup Picks =6)
 # ---------------------------------------------------------
 
-def format_results(candidates):
-    """Render Top + Backup picks as a Telegram message."""
-    if not candidates:
+def format_results(strong, backup):
+    """Render Strong + Backup picks in the exact required format."""
+    if not strong and not backup:
         return "⚽ No strong draw candidates found today."
 
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    top      = candidates[:3]
-    backups  = candidates[3:8]   # max 5 backups, 8 total
+    out = "🎯 Strong Draw Picks\n"
+    n = 0
+    for c in strong:
+        n += 1
+        out += (
+            f"\n{n}) {c['match']}\n"
+            f"   🏆 {c['league']}\n"
+            f"   ⭐ Score: {c['score']}/10\n"
+        )
 
-    out = "🎯 STRONG DRAW PICKS\n\n🏆 TOP PICKS\n"
-    for c in top:
-        out += f"\n• {c['match']}\n   🏆 {c['league']}\n   ⭐ Score: {c['score']}/10\n"
-
-    if backups:
-        out += "\n📌 BACKUP PICKS\n"
-        for c in backups:
-            out += f"\n• {c['match']}\n   🏆 {c['league']}\n   ⭐ Score: {c['score']}/10\n"
+    if backup:
+        out += "\n────────────────────\n\n📌 Backup Picks\n"
+        # Continue the numbering from where strong left off
+        for c in backup:
+            n += 1
+            out += (
+                f"\n{n}) {c['match']}\n"
+                f"   🏆 {c['league']}\n"
+                f"   ⭐ Score: {c['score']}/10\n"
+            )
 
     return out.strip()
 
@@ -337,6 +396,10 @@ def run_analysis():
     print("[INFO] Running draw analysis...")
 
     matches = get_today_matches()
+
+    if len(matches) < 40:
+        print(f"WARNING: Too few matches — check league coverage (got {len(matches)})")
+
     candidates = []
 
     for game in matches:
@@ -344,7 +407,7 @@ def run_analysis():
             league = game.get("league", {})
             league_id   = league.get("id")
             season      = league.get("season")            # auto-detected
-            league_name = league.get("name", "Unknown")
+            league_name = ALLOWED_LEAGUES.get(league_id, league.get("name", "Unknown"))
 
             if league_id not in ALLOWED_LEAGUES or not season:
                 continue
@@ -355,7 +418,6 @@ def run_analysis():
             away_name = game["teams"]["away"]["name"]
 
             standings = get_standings(league_id, season)
-            time.sleep(0.4)
             if not standings:
                 continue
 
@@ -363,18 +425,13 @@ def run_analysis():
             away = standings.get(away_id)
 
             form_h = get_recent_form(home_id, league_id, season)
-            time.sleep(0.4)
             form_a = get_recent_form(away_id, league_id, season)
-            time.sleep(0.4)
             h2h    = get_h2h(home_id, away_id)
-            time.sleep(0.4)
 
             if not passes_filters(home, away, form_h, form_a, h2h):
                 continue
 
             score = calculate_draw_score(home, away, form_h, form_a, h2h)
-            if score < 7:
-                continue
 
             candidates.append({
                 "match":  f"{home_name} vs {away_name}",
@@ -386,8 +443,15 @@ def run_analysis():
             print(f"[ERROR] Skipping match: {e}")
             continue
 
-    daily_results = format_results(candidates)
-    print(f"[INFO] Analysis done. {len(candidates)} candidate(s) found.")
+    # Split into Strong (≥7) and Backup (=6)
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    strong = [c for c in candidates if c["score"] >= 7][:3]   # top 3 only
+    backup = [c for c in candidates if c["score"] == 6][:4]   # max 4
+
+    print(f"Strong candidates: {len(strong)}")
+    print(f"Backup candidates: {len(backup)}")
+
+    daily_results = format_results(strong, backup)
     return daily_results
 
 
@@ -414,8 +478,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 /debugmatches — Fixture counts, detected leagues and samples\n"
         "ℹ️ /start — Show this help menu\n\n"
         "──────────────────────\n"
-        "⭐ Picks are scored out of 10. Only matches scoring 7 or above are shown.\n"
-        "🏆 Top 3 = strongest picks  •  Backup 5 = secondary picks."
+        "⭐ Picks are scored. Score ≥7 = Strong, =6 = Backup.\n"
+        "🏆 Up to 3 Strong + up to 4 Backup picks per day."
     )
     await update.message.reply_text(msg)
 
@@ -438,7 +502,6 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
         today = datetime.utcnow().strftime("%Y-%m-%d")
         await update.message.reply_text(f"📊 Fetching matches for {today} (UTC)...")
 
-        # Raw call so we can show pre-filter totals too
         data = _api_get("/fixtures", {"date": today})
         raw = data.get("response", []) if data else []
         total_raw = len(raw)
@@ -449,7 +512,7 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
             f"📊 Debug — {today} (UTC)\n\n"
             f"📦 Total fixtures fetched : {total_raw}\n"
             f"✅ After league filter    : {len(filtered)}\n"
-            f"🌍 Detected league IDs    : {league_ids[:20] or 'none'}\n\n"
+            f"🌍 Detected league IDs    : {league_ids[:25] or 'none'}\n\n"
         )
 
         if filtered:
@@ -457,7 +520,8 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
             for m in filtered[:5]:
                 home   = m["teams"]["home"]["name"]
                 away   = m["teams"]["away"]["name"]
-                league = m["league"]["name"]
+                lid    = m["league"]["id"]
+                league = ALLOWED_LEAGUES.get(lid, m["league"]["name"])
                 season = m["league"].get("season", "?")
                 msg += f"• {home} vs {away}\n   🏆 {league} (season {season})\n\n"
         else:
@@ -521,7 +585,9 @@ def set_webhook():
 
 @app.route("/api/run_daily", methods=["GET", "POST"])
 def run_daily():
-    """Triggered by Vercel Cron at 00:05 UTC daily."""
+    """Triggered by Vercel Cron at 00:05 UTC daily.
+    Resets all caches at the start of every daily run."""
+    reset_all_caches()
     result = run_analysis()
     preview = result[:120] if result else "No results"
     return f"✅ Analysis complete: {preview}", 200
