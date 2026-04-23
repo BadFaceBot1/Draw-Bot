@@ -28,10 +28,7 @@ if not API_FOOTBALL_KEY:
     raise RuntimeError("API_FOOTBALL_KEY environment variable is not set.")
 
 BASE_URL = "https://v3.football.api-sports.io"
-
-HEADERS = {
-    "x-apisports-key": API_FOOTBALL_KEY,
-}
+HEADERS  = {"x-apisports-key": API_FOOTBALL_KEY}
 
 
 # ---------------------------------------------------------
@@ -39,48 +36,36 @@ HEADERS = {
 # ---------------------------------------------------------
 
 ALLOWED_LEAGUES = {
-    # ITALY
     137: "Serie B",
     72:  "Serie C",
 
-    # SPAIN
     141: "Segunda Division",
     138: "Primera RFEF",
     142: "Segunda RFEF",
 
-    # FRANCE
     65:  "Ligue 2",
     66:  "National",
 
-    # ENGLAND
     41:  "League One",
     42:  "League Two",
 
-    # GERMANY
     78:  "3. Liga",
 
-    # NETHERLANDS
     89:  "Eerste Divisie",
 
-    # PORTUGAL
     94:  "Liga Portugal 2",
 
-    # BELGIUM
     144: "Challenger Pro League",
 
-    # AUSTRIA
     218: "2. Liga",
 
-    # SWITZERLAND
     207: "Challenge League",
 
-    # SCANDINAVIA
     113: "Superettan",
     104: "OBOS Ligaen",
     119: "Division 1",
     244: "Ykkonen",
 
-    # EASTERN EUROPE
     284: "Liga II Romania",
     106: "I Liga Poland",
     345: "FNL Czech",
@@ -88,7 +73,6 @@ ALLOWED_LEAGUES = {
     210: "Super League 2 Greece",
     271: "NB II Hungary",
 
-    # SOUTH AMERICA
     128: "Primera Nacional Argentina",
     289: "Division Intermedia Paraguay",
     292: "Segunda Uruguay",
@@ -96,7 +80,6 @@ ALLOWED_LEAGUES = {
     266: "Primera B Chile",
     281: "Liga 2 Peru",
 
-    # BRAZIL
     71:  "Serie B Brazil",
     73:  "Serie C Brazil",
 }
@@ -106,11 +89,11 @@ ALLOWED_LEAGUES = {
 # 3. CACHING (12-hour TTL + manual daily reset)
 # ---------------------------------------------------------
 
-CACHE_TTL = 12 * 60 * 60   # 12 hours in seconds
+CACHE_TTL = 12 * 60 * 60   # 12 hours
 
-standings_cache = {}   # key: f"{league_id}_{season}"   -> (timestamp, value)
-form_cache      = {}   # key: team_id                   -> (timestamp, value)
-h2h_cache       = {}   # key: f"{home_id}_{away_id}"    -> (timestamp, value)
+standings_cache = {}   # key: f"{league_id}_{season}"
+form_cache      = {}   # key: team_id
+h2h_cache       = {}   # key: f"{home_id}_{away_id}"
 
 daily_results = None   # last analysis output
 
@@ -131,7 +114,6 @@ def _cache_set(cache, key, value):
 
 
 def reset_all_caches():
-    """Daily reset — clears all caches at the start of a new analysis day."""
     standings_cache.clear()
     form_cache.clear()
     h2h_cache.clear()
@@ -143,7 +125,7 @@ def reset_all_caches():
 # ---------------------------------------------------------
 
 def _api_get(path, params=None, timeout=10):
-    """Single wrapper for all API-Sports GET requests. Always sleeps 0.4s after."""
+    """All API-Sports GET requests go through here. Always sleeps 0.4s."""
     try:
         r = requests.get(
             f"{BASE_URL}{path}",
@@ -171,11 +153,10 @@ def _api_get(path, params=None, timeout=10):
 
 
 # ---------------------------------------------------------
-# 5. FIXTURE / STANDINGS / FORM / H2H
+# 5. FIXTURES / STANDINGS / FORM / H2H
 # ---------------------------------------------------------
 
 def get_matches_by_date(date_str):
-    """Fetch fixtures for a date and filter to allowed leagues only."""
     print(f"[INFO] Fetching fixtures for {date_str}")
     data = _api_get("/fixtures", {"date": date_str})
     if not data:
@@ -197,7 +178,7 @@ def get_today_matches():
 
 
 def get_standings(league_id, season):
-    """Return dict {team_id: stats} or None. Cached per (league, season)."""
+    """Fetched once per (league, season) per cache window."""
     key = f"{league_id}_{season}"
     cached = _cache_get(standings_cache, key)
     if cached is not None:
@@ -222,6 +203,8 @@ def get_standings(league_id, season):
                 "rank":          team.get("rank", 99),
                 "played":        team["all"]["played"],
                 "draws":         team["all"]["draw"],
+                "wins":          team["all"]["win"],
+                "losses":        team["all"]["lose"],
                 "goals_for":     team["all"]["goals"]["for"],
                 "goals_against": team["all"]["goals"]["against"],
                 "goal_diff":     team.get("goalsDiff", 0),
@@ -234,7 +217,7 @@ def get_standings(league_id, season):
 
 
 def get_recent_form(team_id, league_id, season):
-    """Return list of last-5 results like ['W','D','L',...]. Cached per team."""
+    """Last-5 results list ['W','D','L',...]. Cached per team_id."""
     cached = _cache_get(form_cache, team_id)
     if cached is not None:
         return cached
@@ -272,7 +255,7 @@ def get_recent_form(team_id, league_id, season):
 
 
 def get_h2h(home_id, away_id):
-    """Return {'total': n, 'draw_rate': r} or None. Cached per pair."""
+    """{'total': n, 'draw_rate': r, 'over15_rate': r, 'under35_rate': r, 'btts_rate': r}."""
     key = f"{home_id}_{away_id}"
     cached = _cache_get(h2h_cache, key)
     if cached is not None:
@@ -283,70 +266,72 @@ def get_h2h(home_id, away_id):
         return None
     fixtures = data.get("response", []) or []
     total = len(fixtures)
-    draws = 0
+    draws = over15 = under35 = btts = 0
     for g in fixtures:
         try:
             hg = g["goals"]["home"]
             ag = g["goals"]["away"]
-            if hg is not None and ag is not None and hg == ag:
-                draws += 1
+            if hg is None or ag is None:
+                continue
+            tot = hg + ag
+            if hg == ag:           draws  += 1
+            if tot >= 2:           over15 += 1
+            if tot <= 3:           under35 += 1
+            if hg >= 1 and ag >= 1: btts  += 1
         except (KeyError, TypeError):
             continue
-    result = {"total": total, "draw_rate": (draws / total) if total > 0 else 0.0}
+    if total == 0:
+        result = {"total": 0, "draw_rate": 0.0, "over15_rate": 0.0,
+                  "under35_rate": 0.0, "btts_rate": 0.0}
+    else:
+        result = {
+            "total":        total,
+            "draw_rate":    draws  / total,
+            "over15_rate":  over15 / total,
+            "under35_rate": under35 / total,
+            "btts_rate":    btts   / total,
+        }
     _cache_set(h2h_cache, key, result)
     return result
 
 
 # ---------------------------------------------------------
-# 6. MATCH FILTERS (H2H removed — now a conditional bonus)
+# 6. DRAW HARD FILTERS  (H2H is NOT a hard filter)
 # ---------------------------------------------------------
 
-def passes_filters(home, away, form_h, form_a):
-    """Hard filters applied before scoring. H2H is NOT used here anymore."""
+def passes_draw_filters(home, away, form_h, form_a):
     if not home or not away:
         return False
-
     if abs(home["rank"] - away["rank"]) > 3:
         return False
-
     if abs(home["goal_diff"] - away["goal_diff"]) > 6:
         return False
-
     hr = home["draws"] / max(home["played"], 1)
     ar = away["draws"] / max(away["played"], 1)
     if (hr + ar) / 2 < 0.25:
         return False
-
     if not form_h or not form_a:
         return False
-
     return True
 
 
 # ---------------------------------------------------------
-# 7. SCORING — base score first, H2H called only if promising
+# 7. SCORING — DRAW MARKET (base score, then conditional H2H)
 # ---------------------------------------------------------
 
-def calculate_base_score(home, away, form_h, form_a):
-    """Score everything except H2H."""
+def score_draw_base(home, away, form_h, form_a):
     score = 0
-
-    # Position gap
     gap = abs(home["rank"] - away["rank"])
     if gap <= 1:
         score += 3
     elif gap <= 3:
         score += 2
 
-    # Goal-difference similarity
     if abs(home["goal_diff"] - away["goal_diff"]) <= 5:
         score += 2
-
-    # Goals-scored similarity
     if abs(home["goals_for"] - away["goals_for"]) <= 10:
         score += 1
 
-    # Season draw rate
     hr = home["draws"] / max(home["played"], 1)
     ar = away["draws"] / max(away["played"], 1)
     avg_dr = (hr + ar) / 2
@@ -355,7 +340,6 @@ def calculate_base_score(home, away, form_h, form_a):
     elif avg_dr >= 0.25:
         score += 2
 
-    # Recent form
     if (form_h.count("D") + form_a.count("D")) >= 3:
         score += 2
 
@@ -363,46 +347,218 @@ def calculate_base_score(home, away, form_h, form_a):
 
 
 # ---------------------------------------------------------
-# 8. ANALYSIS — Strong (≥7) + Backup (=6) pick system
+# 8. SCORING — ALTERNATIVE MARKETS (for accumulator fallback)
 # ---------------------------------------------------------
 
-def format_results(strong, backup):
-    """Render Strong + Backup picks in the exact required format."""
-    if not strong and not backup:
-        return "⚽ No strong draw candidates found today."
+def _avg_goals_per_game(team):
+    p = max(team["played"], 1)
+    return (team["goals_for"] + team["goals_against"]) / p
 
+
+def _scoring_rate(team):
+    p = max(team["played"], 1)
+    return team["goals_for"] / p
+
+
+def _conceding_rate(team):
+    p = max(team["played"], 1)
+    return team["goals_against"] / p
+
+
+def score_double_chance(home, away, form_h, form_a, h2h):
+    """1X or X2 — pick the side covering the stronger team / form."""
+    score = 0
+    # Stronger team rarely loses (top half) → DC for stronger side
+    stronger = home if home["rank"] <= away["rank"] else away
+    weaker   = away if stronger is home else home
+    # Stronger team's loss rate
+    loss_rate = stronger["losses"] / max(stronger["played"], 1)
+    if loss_rate <= 0.20:
+        score += 4
+    elif loss_rate <= 0.30:
+        score += 3
+    elif loss_rate <= 0.40:
+        score += 2
+
+    # Form: stronger team has ≥3 W or D in last 5
+    f = form_h if stronger is home else form_a
+    nondefeats = f.count("W") + f.count("D")
+    if nondefeats >= 4: score += 3
+    elif nondefeats >= 3: score += 2
+
+    # Rank gap small → safer DC
+    if abs(home["rank"] - away["rank"]) <= 5:
+        score += 2
+
+    if h2h and h2h["total"] >= 2:
+        # If the stronger side hasn't been beaten recently in H2H, that's a +1
+        score += 1
+    return score
+
+
+def score_over_15(home, away, form_h, form_a, h2h):
+    score = 0
+    avg_h = _avg_goals_per_game(home)
+    avg_a = _avg_goals_per_game(away)
+    combined = avg_h + avg_a
+    if combined >= 3.2:   score += 5
+    elif combined >= 2.8: score += 4
+    elif combined >= 2.4: score += 3
+    elif combined >= 2.0: score += 2
+
+    # Both teams score consistently
+    if _scoring_rate(home) >= 1.0 and _scoring_rate(away) >= 1.0:
+        score += 2
+    elif _scoring_rate(home) >= 0.8 or _scoring_rate(away) >= 0.8:
+        score += 1
+
+    if h2h and h2h["over15_rate"] >= 0.80:
+        score += 3
+    elif h2h and h2h["over15_rate"] >= 0.60:
+        score += 2
+    return score
+
+
+def score_under_35(home, away, form_h, form_a, h2h):
+    score = 0
+    avg_h = _avg_goals_per_game(home)
+    avg_a = _avg_goals_per_game(away)
+    combined = avg_h + avg_a
+    if combined <= 2.2:   score += 5
+    elif combined <= 2.5: score += 4
+    elif combined <= 2.8: score += 3
+    elif combined <= 3.0: score += 2
+
+    # Both defensively solid
+    if _conceding_rate(home) <= 1.1 and _conceding_rate(away) <= 1.1:
+        score += 2
+    elif _conceding_rate(home) <= 1.3 or _conceding_rate(away) <= 1.3:
+        score += 1
+
+    if h2h and h2h["under35_rate"] >= 0.80:
+        score += 3
+    elif h2h and h2h["under35_rate"] >= 0.60:
+        score += 2
+    return score
+
+
+def score_btts_yes(home, away, form_h, form_a, h2h):
+    score = 0
+    sh = _scoring_rate(home)
+    sa = _scoring_rate(away)
+    ch = _conceding_rate(home)
+    ca = _conceding_rate(away)
+
+    if sh >= 1.2 and sa >= 1.2:   score += 4
+    elif sh >= 1.0 and sa >= 1.0: score += 3
+    elif sh >= 0.8 and sa >= 0.8: score += 2
+
+    if ch >= 1.0 and ca >= 1.0:   score += 3
+    elif ch >= 0.8 and ca >= 0.8: score += 2
+
+    if h2h and h2h["btts_rate"] >= 0.80:
+        score += 3
+    elif h2h and h2h["btts_rate"] >= 0.60:
+        score += 2
+    return score
+
+
+def score_draw_no_bet(home, away, form_h, form_a, h2h):
+    """DNB on the stronger team — like DC but stricter."""
+    score = 0
+    stronger = home if home["rank"] <= away["rank"] else away
+    weaker   = away if stronger is home else home
+
+    win_rate = stronger["wins"] / max(stronger["played"], 1)
+    if win_rate >= 0.50:   score += 4
+    elif win_rate >= 0.40: score += 3
+    elif win_rate >= 0.33: score += 2
+
+    # Recent form of stronger side
+    f = form_h if stronger is home else form_a
+    if f.count("W") >= 3:   score += 3
+    elif f.count("W") >= 2: score += 2
+
+    # GD gap favouring stronger
+    if (stronger["goal_diff"] - weaker["goal_diff"]) >= 5:
+        score += 2
+    elif (stronger["goal_diff"] - weaker["goal_diff"]) >= 2:
+        score += 1
+
+    if h2h and h2h["total"] >= 2:
+        score += 1
+    return score
+
+
+def score_all_markets(home, away, form_h, form_a, h2h):
+    return {
+        "Draw":           score_draw_base(home, away, form_h, form_a) + (
+                              2 if (h2h and h2h.get("draw_rate", 0) >= 0.30) else 0),
+        "Double Chance":  score_double_chance(home, away, form_h, form_a, h2h),
+        "Over 1.5":       score_over_15(home, away, form_h, form_a, h2h),
+        "Under 3.5":      score_under_35(home, away, form_h, form_a, h2h),
+        "BTTS Yes":       score_btts_yes(home, away, form_h, form_a, h2h),
+        "Draw No Bet":    score_draw_no_bet(home, away, form_h, form_a, h2h),
+    }
+
+
+# ---------------------------------------------------------
+# 9. OUTPUT FORMATTING
+# ---------------------------------------------------------
+
+def format_draw_results(strong, backup):
+    if not strong and not backup:
+        return None
     out = "🎯 Strong Draw Picks\n"
     n = 0
     for c in strong:
         n += 1
-        out += (
-            f"\n{n}) {c['match']}\n"
-            f"   🏆 {c['league']}\n"
-            f"   ⭐ Score: {c['score']}/10\n"
-        )
-
+        out += (f"\n{n}) {c['match']}\n"
+                f"   🏆 {c['league']}\n"
+                f"   ⭐ Score: {c['score']}/10\n")
     if backup:
         out += "\n────────────────────\n\n📌 Backup Picks\n"
         for c in backup:
             n += 1
-            out += (
-                f"\n{n}) {c['match']}\n"
-                f"   🏆 {c['league']}\n"
-                f"   ⭐ Score: {c['score']}/10\n"
-            )
-
+            out += (f"\n{n}) {c['match']}\n"
+                    f"   🏆 {c['league']}\n"
+                    f"   ⭐ Score: {c['score']}/10\n")
     return out.strip()
 
 
+def format_accumulator(picks, reserves):
+    if not picks:
+        return "⚽ No accumulator picks could be built today."
+    out = "🎯 ACCUMULATOR PICKS\n"
+    for i, p in enumerate(picks, 1):
+        out += (f"\n{i}) {p['match']}\n"
+                f"   🏆 {p['league']}\n"
+                f"   📈 Market: {p['market']}\n"
+                f"   ⭐ Confidence: {p['score']}/10\n")
+    if reserves:
+        out += "\n────────────────────\n\n🛟 Reserve Picks\n"
+        for j, p in enumerate(reserves, len(picks) + 1):
+            out += (f"\n{j}) {p['match']}\n"
+                    f"   🏆 {p['league']}\n"
+                    f"   📈 Market: {p['market']}\n"
+                    f"   ⭐ Confidence: {p['score']}/10\n")
+    return out.strip()
+
+
+# ---------------------------------------------------------
+# 10. MAIN ANALYSIS — DRAW MODE first, ACCUMULATOR fallback
+# ---------------------------------------------------------
+
 def run_analysis():
-    """Full draw-prediction pipeline. Stores result in daily_results."""
+    """Pipeline: scan fixtures → score draw → if no draws, build accumulator."""
     global daily_results
     print("[INFO] Running draw analysis...")
 
     matches = get_today_matches()
 
-    strong_candidates = []
-    backup_candidates = []
+    strong_draws  = []
+    backup_draws  = []
+    enriched      = []   # for accumulator fallback
 
     for game in matches:
         try:
@@ -422,57 +578,95 @@ def run_analysis():
             standings = get_standings(league_id, season)
             if not standings:
                 continue
-
             home = standings.get(home_id)
             away = standings.get(away_id)
+            if not home or not away:
+                continue
 
             form_h = get_recent_form(home_id, league_id, season)
             form_a = get_recent_form(away_id, league_id, season)
 
-            if not passes_filters(home, away, form_h, form_a):
-                continue
-
-            # Base score WITHOUT H2H
-            score = calculate_base_score(home, away, form_h, form_a)
-
-            # Smart H2H — only fetch if the match already looks promising
-            if score >= 5:
-                h2h = get_h2h(home_id, away_id)
-                if h2h and h2h["draw_rate"] >= 0.30:
-                    score += 2
-            # else: skip H2H entirely to save API calls
+            # ---- DRAW PATH ----
+            if passes_draw_filters(home, away, form_h, form_a):
+                base = score_draw_base(home, away, form_h, form_a)
+                h2h = None
+                if base >= 5:
+                    h2h = get_h2h(home_id, away_id)
+                    if h2h and h2h.get("draw_rate", 0) >= 0.30:
+                        base += 2
+                draw_score = base
+            else:
+                draw_score = 0
+                h2h = None
 
             entry = {
                 "match":  f"{home_name} vs {away_name}",
                 "league": league_name,
-                "score":  score,
+                "score":  draw_score,
             }
+            if draw_score >= 7:
+                strong_draws.append(entry)
+            elif draw_score == 6:
+                backup_draws.append(entry)
 
-            if score >= 7:
-                strong_candidates.append(entry)
-            elif score == 6:
-                backup_candidates.append(entry)
+            # Stash enriched data for fallback accumulator (no extra API calls)
+            enriched.append({
+                "home": home, "away": away,
+                "form_h": form_h, "form_a": form_a,
+                "h2h": h2h,                         # may be None
+                "label": f"{home_name} vs {away_name}",
+                "league": league_name,
+            })
 
         except Exception as e:
             print(f"[ERROR] Skipping match: {e}")
             continue
 
-    # Sort and apply output limits
-    strong_candidates.sort(key=lambda x: x["score"], reverse=True)
-    backup_candidates.sort(key=lambda x: x["score"], reverse=True)
+    strong_draws.sort(key=lambda x: x["score"], reverse=True)
+    backup_draws.sort(key=lambda x: x["score"], reverse=True)
+    print(f"Strong candidates: {len(strong_draws)}")
+    print(f"Backup candidates: {len(backup_draws)}")
 
-    print(f"Strong candidates: {len(strong_candidates)}")
-    print(f"Backup candidates: {len(backup_candidates)}")
+    # ---- DRAW MODE OUTPUT ----
+    if strong_draws:
+        daily_results = format_draw_results(strong_draws[:3], backup_draws[:4])
+        return daily_results
 
-    strong = strong_candidates[:3]   # Top 3
-    backup = backup_candidates[:4]   # Max 4
+    # ---- ACCUMULATOR FALLBACK ----
+    print("[INFO] No strong draws → building accumulator...")
+    acca_candidates = []
+    for e in enriched:
+        markets = score_all_markets(e["home"], e["away"], e["form_h"], e["form_a"], e["h2h"])
+        best_mkt, best_score = max(markets.items(), key=lambda kv: kv[1])
+        if best_score >= 7:
+            acca_candidates.append({
+                "match":  e["label"],
+                "league": e["league"],
+                "market": best_mkt,
+                "score":  best_score,
+            })
 
-    daily_results = format_results(strong, backup)
+    acca_candidates.sort(key=lambda x: x["score"], reverse=True)
+    print(f"Accumulator candidates (score≥7): {len(acca_candidates)}")
+
+    if len(acca_candidates) < 6:
+        print(f"[INFO] Only {len(acca_candidates)} acca picks — below minimum of 6.")
+        # Show whatever we have, but add a note
+        if not acca_candidates and not backup_draws:
+            daily_results = "⚽ No strong picks (draws or accumulator) found today."
+            return daily_results
+        if not acca_candidates:
+            daily_results = format_draw_results([], backup_draws[:4])
+            return daily_results
+
+    main_picks = acca_candidates[:12]                 # max 12
+    reserves   = acca_candidates[len(main_picks):len(main_picks) + 4]  # 0–4
+    daily_results = format_accumulator(main_picks, reserves)
     return daily_results
 
 
 # ---------------------------------------------------------
-# 9. TELEGRAM COMMAND HANDLERS
+# 11. TELEGRAM COMMAND HANDLERS
 # ---------------------------------------------------------
 
 BOT_COMMANDS = [
@@ -486,16 +680,17 @@ BOT_COMMANDS = [
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "👋 Welcome to the Strong Draw Predictor Bot!\n\n"
-        "I analyse football matches across selected lower leagues and surface "
-        "the strongest draw candidates using standings, form, and head-to-head data.\n\n"
+        "I scan football matches across selected lower leagues and surface the "
+        "strongest draw candidates. If no strong draws exist today, I'll build "
+        "an accumulator across draw / double chance / over 1.5 / under 3.5 / "
+        "BTTS / draw-no-bet markets.\n\n"
         "📋 Commands:\n\n"
         "🎯 /strongdraws — Today's top draw picks (auto-updated daily at 00:05 UTC)\n"
         "🔍 /testdraws — Run a fresh analysis right now\n"
         "📊 /debugmatches — Fixture counts, detected leagues and samples\n"
         "ℹ️ /start — Show this help menu\n\n"
         "──────────────────────\n"
-        "⭐ Picks are scored. Score ≥7 = Strong, =6 = Backup.\n"
-        "🏆 Up to 3 Strong + up to 4 Backup picks per day."
+        "⭐ Score ≥7 = Strong, =6 = Backup. Accumulator picks need ≥7 confidence."
     )
     await update.message.reply_text(msg)
 
@@ -549,7 +744,7 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ---------------------------------------------------------
-# 10. UPDATE PROCESSOR (used by webhook)
+# 12. UPDATE PROCESSOR (used by webhook)
 # ---------------------------------------------------------
 
 async def process_update(update_data: dict):
@@ -558,13 +753,12 @@ async def process_update(update_data: dict):
         application.add_handler(CommandHandler("strongdraws",  strongdraws_command))
         application.add_handler(CommandHandler("testdraws",    testdraws_command))
         application.add_handler(CommandHandler("debugmatches", debugmatches_command))
-
         update = Update.de_json(update_data, application.bot)
         await application.process_update(update)
 
 
 # ---------------------------------------------------------
-# 11. FLASK APP / ROUTES
+# 13. FLASK APP / ROUTES
 # ---------------------------------------------------------
 
 app = Flask(__name__)
@@ -586,7 +780,6 @@ def webhook():
 
 @app.route("/api/set_webhook", methods=["GET"])
 def set_webhook():
-    """Call once after deploying to register the webhook with Telegram."""
     async def _set():
         async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
             await application.bot.set_my_commands(BOT_COMMANDS)
@@ -601,8 +794,7 @@ def set_webhook():
 
 @app.route("/api/run_daily", methods=["GET", "POST"])
 def run_daily():
-    """Triggered by Vercel Cron at 00:05 UTC daily.
-    Resets all caches at the start of every daily run."""
+    """Vercel Cron @ 00:05 UTC. Resets caches, then runs full analysis."""
     reset_all_caches()
     result = run_analysis()
     preview = result[:120] if result else "No results"
@@ -610,7 +802,7 @@ def run_daily():
 
 
 # ---------------------------------------------------------
-# 12. LOCAL DEV ENTRYPOINT (Replit / direct run)
+# 14. LOCAL DEV ENTRYPOINT (Replit / direct run)
 # ---------------------------------------------------------
 
 if __name__ == "__main__":
