@@ -35,59 +35,70 @@ HEADERS = {
 
 
 # ---------------------------------------------------------
-# 2. ALLOWED LEAGUES (expanded whitelist with display names)
+# 2. ALLOWED LEAGUES (final expanded whitelist)
 # ---------------------------------------------------------
 
 ALLOWED_LEAGUES = {
     # ITALY
-    137: "Serie B (Italy)",
-    72:  "Serie C (Italy)",
+    137: "Serie B",
+    72:  "Serie C",
 
     # SPAIN
-    141: "Segunda Division (Spain)",
-    138: "Primera RFEF (Spain)",
+    141: "Segunda Division",
+    138: "Primera RFEF",
+    142: "Segunda RFEF",
 
     # FRANCE
-    65:  "Ligue 2 (France)",
-    66:  "National (France)",
-
-    # NETHERLANDS
-    89:  "Eerste Divisie",
-
-    # GERMANY
-    78:  "3. Liga",
-
-    # PORTUGAL
-    94:  "Liga 2",
+    65:  "Ligue 2",
+    66:  "National",
 
     # ENGLAND
     41:  "League One",
     42:  "League Two",
 
-    # SCANDINAVIA
-    113: "Superettan (Sweden)",
-    104: "OBOS Ligaen (Norway)",
-    119: "Division 1 (Denmark)",
-    244: "Ykkonen (Finland)",
+    # GERMANY
+    78:  "3. Liga",
 
-    # EAST EUROPE
-    284: "Liga II (Romania)",
-    106: "I Liga (Poland)",
-    345: "FNL (Czech Republic)",
-    203: "1. Lig (Turkey)",
-    210: "Super League 2 (Greece)",
+    # NETHERLANDS
+    89:  "Eerste Divisie",
+
+    # PORTUGAL
+    94:  "Liga Portugal 2",
+
+    # BELGIUM
+    144: "Challenger Pro League",
+
+    # AUSTRIA
+    218: "2. Liga",
+
+    # SWITZERLAND
+    207: "Challenge League",
+
+    # SCANDINAVIA
+    113: "Superettan",
+    104: "OBOS Ligaen",
+    119: "Division 1",
+    244: "Ykkonen",
+
+    # EASTERN EUROPE
+    284: "Liga II Romania",
+    106: "I Liga Poland",
+    345: "FNL Czech",
+    203: "1. Lig Turkey",
+    210: "Super League 2 Greece",
+    271: "NB II Hungary",
 
     # SOUTH AMERICA
-    128: "Primera Nacional (Argentina)",
-    289: "Division Intermedia (Paraguay)",
-    292: "Segunda Division (Uruguay)",
-    239: "Primera B (Colombia)",
-    266: "Primera B (Chile)",
-    281: "Liga 2 (Peru)",
+    128: "Primera Nacional Argentina",
+    289: "Division Intermedia Paraguay",
+    292: "Segunda Uruguay",
+    239: "Primera B Colombia",
+    266: "Primera B Chile",
+    281: "Liga 2 Peru",
 
     # BRAZIL
-    71:  "Serie B (Brazil)",
-    73:  "Serie C (Brazil)",
+    71:  "Serie B Brazil",
+    73:  "Serie C Brazil",
 }
 
 
@@ -172,9 +183,11 @@ def get_matches_by_date(date_str):
     raw = data.get("response", []) or []
     league_ids = sorted({m.get("league", {}).get("id") for m in raw if m.get("league")})
     filtered = [m for m in raw if m.get("league", {}).get("id") in ALLOWED_LEAGUES]
-    print(f"Matches fetched: {len(raw)}")
+    print(f"Total matches fetched: {len(raw)}")
     print(f"Matches after league filter: {len(filtered)}")
     print(f"[INFO] League IDs detected (sample): {league_ids[:25]}")
+    if len(filtered) < 40:
+        print("WARNING: Too few matches after filtering.")
     return filtered
 
 
@@ -285,11 +298,11 @@ def get_h2h(home_id, away_id):
 
 
 # ---------------------------------------------------------
-# 6. MATCH FILTERS
+# 6. MATCH FILTERS (H2H removed — now a conditional bonus)
 # ---------------------------------------------------------
 
-def passes_filters(home, away, form_h, form_a, h2h):
-    """Return True if a match meets all hard filters."""
+def passes_filters(home, away, form_h, form_a):
+    """Hard filters applied before scoring. H2H is NOT used here anymore."""
     if not home or not away:
         return False
 
@@ -304,9 +317,6 @@ def passes_filters(home, away, form_h, form_a, h2h):
     if (hr + ar) / 2 < 0.25:
         return False
 
-    if not h2h or h2h["total"] < 2:
-        return False
-
     if not form_h or not form_a:
         return False
 
@@ -314,10 +324,11 @@ def passes_filters(home, away, form_h, form_a, h2h):
 
 
 # ---------------------------------------------------------
-# 7. SCORING (max 11 points after additions)
+# 7. SCORING — base score first, H2H called only if promising
 # ---------------------------------------------------------
 
-def calculate_draw_score(home, away, form_h, form_a, h2h):
+def calculate_base_score(home, away, form_h, form_a):
+    """Score everything except H2H."""
     score = 0
 
     # Position gap
@@ -328,13 +339,11 @@ def calculate_draw_score(home, away, form_h, form_a, h2h):
         score += 2
 
     # Goal-difference similarity
-    gd_diff = abs(home["goal_diff"] - away["goal_diff"])
-    if gd_diff <= 5:
+    if abs(home["goal_diff"] - away["goal_diff"]) <= 5:
         score += 2
 
-    # Goals-scored similarity (NEW)
-    goals_scored_diff = abs(home["goals_for"] - away["goals_for"])
-    if goals_scored_diff <= 10:
+    # Goals-scored similarity
+    if abs(home["goals_for"] - away["goals_for"]) <= 10:
         score += 1
 
     # Season draw rate
@@ -350,15 +359,11 @@ def calculate_draw_score(home, away, form_h, form_a, h2h):
     if (form_h.count("D") + form_a.count("D")) >= 3:
         score += 2
 
-    # Head-to-head
-    if h2h and h2h["draw_rate"] >= 0.30:
-        score += 2
-
     return score
 
 
 # ---------------------------------------------------------
-# 8. ANALYSIS  (Strong Picks ≥7 + Backup Picks =6)
+# 8. ANALYSIS — Strong (≥7) + Backup (=6) pick system
 # ---------------------------------------------------------
 
 def format_results(strong, backup):
@@ -378,7 +383,6 @@ def format_results(strong, backup):
 
     if backup:
         out += "\n────────────────────\n\n📌 Backup Picks\n"
-        # Continue the numbering from where strong left off
         for c in backup:
             n += 1
             out += (
@@ -397,10 +401,8 @@ def run_analysis():
 
     matches = get_today_matches()
 
-    if len(matches) < 40:
-        print(f"WARNING: Too few matches — check league coverage (got {len(matches)})")
-
-    candidates = []
+    strong_candidates = []
+    backup_candidates = []
 
     for game in matches:
         try:
@@ -426,30 +428,44 @@ def run_analysis():
 
             form_h = get_recent_form(home_id, league_id, season)
             form_a = get_recent_form(away_id, league_id, season)
-            h2h    = get_h2h(home_id, away_id)
 
-            if not passes_filters(home, away, form_h, form_a, h2h):
+            if not passes_filters(home, away, form_h, form_a):
                 continue
 
-            score = calculate_draw_score(home, away, form_h, form_a, h2h)
+            # Base score WITHOUT H2H
+            score = calculate_base_score(home, away, form_h, form_a)
 
-            candidates.append({
+            # Smart H2H — only fetch if the match already looks promising
+            if score >= 5:
+                h2h = get_h2h(home_id, away_id)
+                if h2h and h2h["draw_rate"] >= 0.30:
+                    score += 2
+            # else: skip H2H entirely to save API calls
+
+            entry = {
                 "match":  f"{home_name} vs {away_name}",
                 "league": league_name,
                 "score":  score,
-            })
+            }
+
+            if score >= 7:
+                strong_candidates.append(entry)
+            elif score == 6:
+                backup_candidates.append(entry)
 
         except Exception as e:
             print(f"[ERROR] Skipping match: {e}")
             continue
 
-    # Split into Strong (≥7) and Backup (=6)
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    strong = [c for c in candidates if c["score"] >= 7][:3]   # top 3 only
-    backup = [c for c in candidates if c["score"] == 6][:4]   # max 4
+    # Sort and apply output limits
+    strong_candidates.sort(key=lambda x: x["score"], reverse=True)
+    backup_candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    print(f"Strong candidates: {len(strong)}")
-    print(f"Backup candidates: {len(backup)}")
+    print(f"Strong candidates: {len(strong_candidates)}")
+    print(f"Backup candidates: {len(backup_candidates)}")
+
+    strong = strong_candidates[:3]   # Top 3
+    backup = backup_candidates[:4]   # Max 4
 
     daily_results = format_results(strong, backup)
     return daily_results
