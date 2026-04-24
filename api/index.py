@@ -785,10 +785,36 @@ tg_app.add_handler(CommandHandler("testdraws",    testdraws_command))
 tg_app.add_handler(CommandHandler("debugmatches", debugmatches_command))
 
 
+# --- Persistent background event loop ----------------------------------
+# PTB's httpx.AsyncClient is bound to the loop it was initialised in.
+# Flask's per-request asyncio.run() spawns a new loop each time, which
+# would orphan that client → "Event loop is closed". Instead we run ONE
+# loop on a daemon thread and dispatch every coroutine onto it.
+# -----------------------------------------------------------------------
+
+_bg_loop = asyncio.new_event_loop()
+
+
+def _bg_loop_runner():
+    asyncio.set_event_loop(_bg_loop)
+    _bg_loop.run_forever()
+
+
+threading.Thread(target=_bg_loop_runner, daemon=True).start()
+
+
+def _run_async(coro, timeout=30):
+    """Schedule a coroutine on the persistent background loop and wait."""
+    future = asyncio.run_coroutine_threadsafe(coro, _bg_loop)
+    return future.result(timeout=timeout)
+
+
+# Initialise the Telegram app ONCE on the background loop.
+_run_async(tg_app.initialize())
+
+
 async def process_update(update_data: dict):
-    """Reuses the global Telegram app — initialises on first use per event loop."""
-    # initialize() is idempotent within the same loop and cheap to call
-    await tg_app.initialize()
+    """Reuses the global Telegram app on the persistent background loop."""
     update = Update.de_json(update_data, tg_app.bot)
     await tg_app.process_update(update)
 
@@ -812,7 +838,7 @@ def webhook():
     if not data:
         return "ok", 200
     try:
-        asyncio.run(process_update(data))
+        _run_async(process_update(data))
     except Exception as e:
         print(f"[WEBHOOK ERROR] {e}")
     return "ok", 200
@@ -821,7 +847,6 @@ def webhook():
 @app.route("/api/set_webhook", methods=["GET"])
 def set_webhook():
     async def _set():
-        await tg_app.initialize()
         await tg_app.bot.set_my_commands(BOT_COMMANDS)
         domain = flask_request.host_url.rstrip("/")
         webhook_url = f"{domain}/api/webhook"
@@ -829,7 +854,7 @@ def set_webhook():
         return webhook_url
 
     try:
-        webhook_url = asyncio.run(_set())
+        webhook_url = _run_async(_set())
         return f"✅ Webhook set to: {webhook_url}", 200
     except Exception as e:
         print(f"[SET_WEBHOOK ERROR] {e}")
