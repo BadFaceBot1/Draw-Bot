@@ -7,6 +7,7 @@
 import os
 import time
 import asyncio
+import threading
 import requests
 from datetime import datetime
 
@@ -121,35 +122,59 @@ def reset_all_caches():
 
 
 # ---------------------------------------------------------
-# 4. API REQUEST HELPER (rate-limit protected)
+# 4. API REQUEST HELPER (retries + global throttle)
 # ---------------------------------------------------------
 
-def _api_get(path, params=None, timeout=10):
-    """All API-Sports GET requests go through here. Always sleeps 0.4s."""
-    try:
-        r = requests.get(
-            f"{BASE_URL}{path}",
-            headers=HEADERS,
-            params=params or {},
-            timeout=timeout,
-        )
-        if r.status_code != 200:
-            print(f"[API ERROR] {r.status_code} for {path} | params={params}")
-            time.sleep(0.4)
+MIN_API_GAP = 0.4                 # minimum spacing between any two requests
+_throttle_lock = threading.Lock()
+_last_api_call_time = 0.0
+
+
+def _throttle():
+    """Enforce a minimum gap between successive API calls (thread-safe)."""
+    global _last_api_call_time
+    with _throttle_lock:
+        elapsed = time.time() - _last_api_call_time
+        if elapsed < MIN_API_GAP:
+            time.sleep(MIN_API_GAP - elapsed)
+        _last_api_call_time = time.time()
+
+
+def _api_get(path, params=None, timeout=10, retries=2, retry_delay=0.6):
+    """All API-Sports GET requests go through here.
+       Throttled (≥0.4s gap), retried on transient errors."""
+    last_err = None
+    for attempt in range(retries + 1):
+        _throttle()
+        try:
+            r = requests.get(
+                f"{BASE_URL}{path}",
+                headers=HEADERS,
+                params=params or {},
+                timeout=timeout,
+            )
+            if 500 <= r.status_code < 600:
+                last_err = f"HTTP {r.status_code}"
+                print(f"[API RETRY] {path} -> {last_err} (attempt {attempt + 1})")
+                time.sleep(retry_delay)
+                continue
+            if r.status_code != 200:
+                print(f"[API ERROR] {r.status_code} for {path} | params={params}")
+                return None
+            data = r.json()
+            if data.get("errors"):
+                print(f"[API ERROR-FIELD] {path} -> {data.get('errors')}")
+            return data
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = type(e).__name__
+            print(f"[API RETRY] {path} -> {last_err} (attempt {attempt + 1})")
+            time.sleep(retry_delay)
+            continue
+        except Exception as e:
+            print(f"[API ERROR] {path}: {e}")
             return None
-        data = r.json()
-        if data.get("errors"):
-            print(f"[API ERROR-FIELD] {path} -> {data.get('errors')}")
-        time.sleep(0.4)
-        return data
-    except requests.Timeout:
-        print(f"[API TIMEOUT] {path}")
-        time.sleep(0.4)
-        return None
-    except Exception as e:
-        print(f"[API ERROR] {path}: {e}")
-        time.sleep(0.4)
-        return None
+    print(f"[API GIVE-UP] {path} after retries (last: {last_err})")
+    return None
 
 
 # ---------------------------------------------------------
@@ -164,8 +189,8 @@ def get_matches_by_date(date_str):
     raw = data.get("response", []) or []
     league_ids = sorted({m.get("league", {}).get("id") for m in raw if m.get("league")})
     filtered = [m for m in raw if m.get("league", {}).get("id") in ALLOWED_LEAGUES]
-    print(f"Total matches fetched: {len(raw)}")
-    print(f"Matches after league filter: {len(filtered)}")
+    print(f"[INFO] Raw fixtures: {len(raw)}")
+    print(f"[INFO] Filtered fixtures: {len(filtered)}")
     print(f"[INFO] League IDs detected (sample): {league_ids[:25]}")
     if len(filtered) < 40:
         print("WARNING: Too few matches after filtering.")
@@ -255,7 +280,8 @@ def get_recent_form(team_id, league_id, season):
 
 
 def get_h2h(home_id, away_id):
-    """{'total': n, 'draw_rate': r, 'over15_rate': r, 'under35_rate': r, 'btts_rate': r}."""
+    """{'total': n, 'draw_rate': r, 'over15_rate': r, 'under35_rate': r, 'btts_rate': r}.
+       Cache-checked by callers — this function still caches on its own as a safety net."""
     key = f"{home_id}_{away_id}"
     cached = _cache_get(h2h_cache, key)
     if cached is not None:
@@ -366,12 +392,9 @@ def _conceding_rate(team):
 
 
 def score_double_chance(home, away, form_h, form_a, h2h):
-    """1X or X2 — pick the side covering the stronger team / form."""
     score = 0
-    # Stronger team rarely loses (top half) → DC for stronger side
     stronger = home if home["rank"] <= away["rank"] else away
     weaker   = away if stronger is home else home
-    # Stronger team's loss rate
     loss_rate = stronger["losses"] / max(stronger["played"], 1)
     if loss_rate <= 0.20:
         score += 4
@@ -380,18 +403,15 @@ def score_double_chance(home, away, form_h, form_a, h2h):
     elif loss_rate <= 0.40:
         score += 2
 
-    # Form: stronger team has ≥3 W or D in last 5
     f = form_h if stronger is home else form_a
     nondefeats = f.count("W") + f.count("D")
     if nondefeats >= 4: score += 3
     elif nondefeats >= 3: score += 2
 
-    # Rank gap small → safer DC
     if abs(home["rank"] - away["rank"]) <= 5:
         score += 2
 
     if h2h and h2h["total"] >= 2:
-        # If the stronger side hasn't been beaten recently in H2H, that's a +1
         score += 1
     return score
 
@@ -406,7 +426,6 @@ def score_over_15(home, away, form_h, form_a, h2h):
     elif combined >= 2.4: score += 3
     elif combined >= 2.0: score += 2
 
-    # Both teams score consistently
     if _scoring_rate(home) >= 1.0 and _scoring_rate(away) >= 1.0:
         score += 2
     elif _scoring_rate(home) >= 0.8 or _scoring_rate(away) >= 0.8:
@@ -429,7 +448,6 @@ def score_under_35(home, away, form_h, form_a, h2h):
     elif combined <= 2.8: score += 3
     elif combined <= 3.0: score += 2
 
-    # Both defensively solid
     if _conceding_rate(home) <= 1.1 and _conceding_rate(away) <= 1.1:
         score += 2
     elif _conceding_rate(home) <= 1.3 or _conceding_rate(away) <= 1.3:
@@ -464,7 +482,6 @@ def score_btts_yes(home, away, form_h, form_a, h2h):
 
 
 def score_draw_no_bet(home, away, form_h, form_a, h2h):
-    """DNB on the stronger team — like DC but stricter."""
     score = 0
     stronger = home if home["rank"] <= away["rank"] else away
     weaker   = away if stronger is home else home
@@ -474,12 +491,10 @@ def score_draw_no_bet(home, away, form_h, form_a, h2h):
     elif win_rate >= 0.40: score += 3
     elif win_rate >= 0.33: score += 2
 
-    # Recent form of stronger side
     f = form_h if stronger is home else form_a
     if f.count("W") >= 3:   score += 3
     elif f.count("W") >= 2: score += 2
 
-    # GD gap favouring stronger
     if (stronger["goal_diff"] - weaker["goal_diff"]) >= 5:
         score += 2
     elif (stronger["goal_diff"] - weaker["goal_diff"]) >= 2:
@@ -556,24 +571,27 @@ def run_analysis():
 
     matches = get_today_matches()
 
-    strong_draws  = []
-    backup_draws  = []
-    enriched      = []   # for accumulator fallback
+    strong_draws = []
+    backup_draws = []
+    enriched     = []                 # for accumulator fallback
+    seen_draws   = set()              # dedupe across draw lists
 
     for game in matches:
         try:
             league = game.get("league", {})
             league_id   = league.get("id")
-            season      = league.get("season")            # auto-detected
+            # FIX 4 — season auto-fallback
+            season      = league.get("season") or datetime.utcnow().year
             league_name = ALLOWED_LEAGUES.get(league_id, league.get("name", "Unknown"))
 
-            if league_id not in ALLOWED_LEAGUES or not season:
+            if league_id not in ALLOWED_LEAGUES:
                 continue
 
             home_id   = game["teams"]["home"]["id"]
             away_id   = game["teams"]["away"]["id"]
             home_name = game["teams"]["home"]["name"]
             away_name = game["teams"]["away"]["name"]
+            match_label = f"{home_name} vs {away_name}"
 
             standings = get_standings(league_id, season)
             if not standings:
@@ -587,34 +605,38 @@ def run_analysis():
             form_a = get_recent_form(away_id, league_id, season)
 
             # ---- DRAW PATH ----
+            draw_score = 0
+            h2h = None
             if passes_draw_filters(home, away, form_h, form_a):
                 base = score_draw_base(home, away, form_h, form_a)
-                h2h = None
+
+                # FIX 2 — only call H2H if base ≥ 5 AND not already cached
                 if base >= 5:
-                    h2h = get_h2h(home_id, away_id)
+                    h2h_key = f"{home_id}_{away_id}"
+                    cached_h2h = _cache_get(h2h_cache, h2h_key)
+                    if cached_h2h is not None:
+                        h2h = cached_h2h
+                    else:
+                        h2h = get_h2h(home_id, away_id)
                     if h2h and h2h.get("draw_rate", 0) >= 0.30:
                         base += 2
                 draw_score = base
-            else:
-                draw_score = 0
-                h2h = None
 
-            entry = {
-                "match":  f"{home_name} vs {away_name}",
-                "league": league_name,
-                "score":  draw_score,
-            }
-            if draw_score >= 7:
-                strong_draws.append(entry)
-            elif draw_score == 6:
-                backup_draws.append(entry)
+            entry = {"match": match_label, "league": league_name, "score": draw_score}
+            if match_label not in seen_draws:
+                if draw_score >= 7:
+                    strong_draws.append(entry)
+                    seen_draws.add(match_label)
+                elif draw_score == 6:
+                    backup_draws.append(entry)
+                    seen_draws.add(match_label)
 
             # Stash enriched data for fallback accumulator (no extra API calls)
             enriched.append({
                 "home": home, "away": away,
                 "form_h": form_h, "form_a": form_a,
                 "h2h": h2h,                         # may be None
-                "label": f"{home_name} vs {away_name}",
+                "label": match_label,
                 "league": league_name,
             })
 
@@ -624,8 +646,8 @@ def run_analysis():
 
     strong_draws.sort(key=lambda x: x["score"], reverse=True)
     backup_draws.sort(key=lambda x: x["score"], reverse=True)
-    print(f"Strong candidates: {len(strong_draws)}")
-    print(f"Backup candidates: {len(backup_draws)}")
+    print(f"[INFO] Strong draws: {len(strong_draws)}")
+    print(f"[INFO] Backup draws: {len(backup_draws)}")
 
     # ---- DRAW MODE OUTPUT ----
     if strong_draws:
@@ -635,7 +657,10 @@ def run_analysis():
     # ---- ACCUMULATOR FALLBACK ----
     print("[INFO] No strong draws → building accumulator...")
     acca_candidates = []
+    seen_acca = set()                              # FIX 5 — dedupe accumulator
     for e in enriched:
+        if e["label"] in seen_acca:
+            continue
         markets = score_all_markets(e["home"], e["away"], e["form_h"], e["form_a"], e["h2h"])
         best_mkt, best_score = max(markets.items(), key=lambda kv: kv[1])
         if best_score >= 7:
@@ -645,22 +670,23 @@ def run_analysis():
                 "market": best_mkt,
                 "score":  best_score,
             })
+            seen_acca.add(e["label"])
 
     acca_candidates.sort(key=lambda x: x["score"], reverse=True)
-    print(f"Accumulator candidates (score≥7): {len(acca_candidates)}")
+    print(f"[INFO] Accumulator candidates: {len(acca_candidates)}")
 
+    # FIX 6 — graceful fallback if accumulator can't reach the 6-pick minimum
     if len(acca_candidates) < 6:
-        print(f"[INFO] Only {len(acca_candidates)} acca picks — below minimum of 6.")
-        # Show whatever we have, but add a note
-        if not acca_candidates and not backup_draws:
-            daily_results = "⚽ No strong picks (draws or accumulator) found today."
-            return daily_results
-        if not acca_candidates:
+        print(f"[INFO] Acca below 6 ({len(acca_candidates)}) — falling back to backup draws.")
+        if backup_draws:
             daily_results = format_draw_results([], backup_draws[:4])
             return daily_results
+        if not acca_candidates:
+            daily_results = "⚽ No strong picks (draws or accumulator) found today."
+            return daily_results
 
-    main_picks = acca_candidates[:12]                 # max 12
-    reserves   = acca_candidates[len(main_picks):len(main_picks) + 4]  # 0–4
+    main_picks = acca_candidates[:12]
+    reserves   = acca_candidates[len(main_picks):len(main_picks) + 4]
     daily_results = format_accumulator(main_picks, reserves)
     return daily_results
 
@@ -744,17 +770,22 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ---------------------------------------------------------
-# 12. UPDATE PROCESSOR (used by webhook)
+# 12. GLOBAL TELEGRAM APPLICATION  (FIX 1 — built once, reused)
 # ---------------------------------------------------------
 
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+application.add_handler(CommandHandler("start",        start_command))
+application.add_handler(CommandHandler("strongdraws",  strongdraws_command))
+application.add_handler(CommandHandler("testdraws",    testdraws_command))
+application.add_handler(CommandHandler("debugmatches", debugmatches_command))
+
+
 async def process_update(update_data: dict):
-    async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
-        application.add_handler(CommandHandler("start",        start_command))
-        application.add_handler(CommandHandler("strongdraws",  strongdraws_command))
-        application.add_handler(CommandHandler("testdraws",    testdraws_command))
-        application.add_handler(CommandHandler("debugmatches", debugmatches_command))
-        update = Update.de_json(update_data, application.bot)
-        await application.process_update(update)
+    """Reuses the global Application — initialises on first use per event loop."""
+    # initialize() is idempotent within the same loop and cheap to call
+    await application.initialize()
+    update = Update.de_json(update_data, application.bot)
+    await application.process_update(update)
 
 
 # ---------------------------------------------------------
@@ -771,30 +802,39 @@ def home():
 
 @app.route("/api/webhook", methods=["POST"])
 def webhook():
+    """FIX 10 — Always return 200, never crash, log any errors."""
     data = flask_request.get_json(force=True, silent=True)
     if not data:
-        return "Bad request", 400
-    asyncio.run(process_update(data))
+        return "ok", 200
+    try:
+        asyncio.run(process_update(data))
+    except Exception as e:
+        print(f"[WEBHOOK ERROR] {e}")
     return "ok", 200
 
 
 @app.route("/api/set_webhook", methods=["GET"])
 def set_webhook():
     async def _set():
-        async with Application.builder().token(TELEGRAM_TOKEN).build() as application:
-            await application.bot.set_my_commands(BOT_COMMANDS)
-            domain = flask_request.host_url.rstrip("/")
-            webhook_url = f"{domain}/api/webhook"
-            await application.bot.set_webhook(url=webhook_url)
-            return webhook_url
+        await application.initialize()
+        await application.bot.set_my_commands(BOT_COMMANDS)
+        domain = flask_request.host_url.rstrip("/")
+        webhook_url = f"{domain}/api/webhook"
+        await application.bot.set_webhook(url=webhook_url)
+        return webhook_url
 
-    webhook_url = asyncio.run(_set())
-    return f"✅ Webhook set to: {webhook_url}", 200
+    try:
+        webhook_url = asyncio.run(_set())
+        return f"✅ Webhook set to: {webhook_url}", 200
+    except Exception as e:
+        print(f"[SET_WEBHOOK ERROR] {e}")
+        return f"❌ Error: {e}", 500
 
 
 @app.route("/api/run_daily", methods=["GET", "POST"])
 def run_daily():
-    """Vercel Cron @ 00:05 UTC. Resets caches, then runs full analysis."""
+    """Vercel Cron @ 00:05 UTC.
+       FIX 9 — strict order: reset_all_caches() THEN run_analysis()."""
     reset_all_caches()
     result = run_analysis()
     preview = result[:120] if result else "No results"
