@@ -771,21 +771,26 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ---------------------------------------------------------
 # 12. GLOBAL TELEGRAM APPLICATION  (FIX 1 — built once, reused)
+#
+# IMPORTANT: do NOT name this variable `application` — Vercel's Python
+# runtime auto-detects WSGI by looking for a module-level `application`
+# or `app`. The Flask WSGI is `app`; this Telegram object must use a
+# different name or Vercel throws "could not determine application interface".
 # ---------------------------------------------------------
 
-application = Application.builder().token(TELEGRAM_TOKEN).build()
-application.add_handler(CommandHandler("start",        start_command))
-application.add_handler(CommandHandler("strongdraws",  strongdraws_command))
-application.add_handler(CommandHandler("testdraws",    testdraws_command))
-application.add_handler(CommandHandler("debugmatches", debugmatches_command))
+tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
+tg_app.add_handler(CommandHandler("start",        start_command))
+tg_app.add_handler(CommandHandler("strongdraws",  strongdraws_command))
+tg_app.add_handler(CommandHandler("testdraws",    testdraws_command))
+tg_app.add_handler(CommandHandler("debugmatches", debugmatches_command))
 
 
 async def process_update(update_data: dict):
-    """Reuses the global Application — initialises on first use per event loop."""
+    """Reuses the global Telegram app — initialises on first use per event loop."""
     # initialize() is idempotent within the same loop and cheap to call
-    await application.initialize()
-    update = Update.de_json(update_data, application.bot)
-    await application.process_update(update)
+    await tg_app.initialize()
+    update = Update.de_json(update_data, tg_app.bot)
+    await tg_app.process_update(update)
 
 
 # ---------------------------------------------------------
@@ -816,11 +821,11 @@ def webhook():
 @app.route("/api/set_webhook", methods=["GET"])
 def set_webhook():
     async def _set():
-        await application.initialize()
-        await application.bot.set_my_commands(BOT_COMMANDS)
+        await tg_app.initialize()
+        await tg_app.bot.set_my_commands(BOT_COMMANDS)
         domain = flask_request.host_url.rstrip("/")
         webhook_url = f"{domain}/api/webhook"
-        await application.bot.set_webhook(url=webhook_url)
+        await tg_app.bot.set_webhook(url=webhook_url)
         return webhook_url
 
     try:
