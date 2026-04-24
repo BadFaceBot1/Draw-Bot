@@ -387,6 +387,35 @@ def score_draw_advanced(home, away, form_h, form_a):
 score_draw_base = score_draw_advanced
 
 
+def calculate_draw_symmetry(home_stats, away_stats):
+    """
+    Analyzes the 'Cancellation Effect' between home and away styles.
+    Returns a score from 0-5.
+    """
+    sym_score = 0
+
+    # A. Goal Expectancy Symmetry (The 1-1 or 0-0 Predictor)
+    # If Home Scored ~= Away Conceded AND Away Scored ~= Home Conceded
+    home_attack  = home_stats['goals_for']     / max(home_stats['played'], 1)
+    away_defense = away_stats['goals_against'] / max(away_stats['played'], 1)
+
+    away_attack  = away_stats['goals_for']     / max(away_stats['played'], 1)
+    home_defense = home_stats['goals_against'] / max(home_stats['played'], 1)
+
+    if abs(home_attack - away_defense) < 0.2 and abs(away_attack - home_defense) < 0.2:
+        sym_score += 3  # High tactical symmetry
+
+    # B. The 'Unstoppable Object vs Immovable Post'
+    # Home team doesn't win much, Away team doesn't lose much
+    home_win_rate  = home_stats['wins']   / max(home_stats['played'], 1)
+    away_loss_rate = away_stats['losses'] / max(away_stats['played'], 1)
+
+    if home_win_rate < 0.35 and away_loss_rate < 0.35:
+        sym_score += 2
+
+    return sym_score
+
+
 # ---------------------------------------------------------
 # 8. SCORING — ALTERNATIVE MARKETS (for accumulator fallback)
 # ---------------------------------------------------------
@@ -572,6 +601,14 @@ def score_all_markets(home, away, form_h, form_a, h2h):
 # 9. OUTPUT FORMATTING
 # ---------------------------------------------------------
 
+def _draw_line(n, c):
+    lock = "🔒 LOCK DRAW — " if c.get("is_lock") else ""
+    sym  = c.get("sym", 0)
+    return (f"\n{n}) {lock}{c['match']}\n"
+            f"   🏆 {c['league']}\n"
+            f"   ⭐ Score: {c['score']}/15  (symmetry +{sym})\n")
+
+
 def format_draw_results(strong, backup):
     if not strong and not backup:
         return None
@@ -579,16 +616,12 @@ def format_draw_results(strong, backup):
     n = 0
     for c in strong:
         n += 1
-        out += (f"\n{n}) {c['match']}\n"
-                f"   🏆 {c['league']}\n"
-                f"   ⭐ Score: {c['score']}/10\n")
+        out += _draw_line(n, c)
     if backup:
         out += "\n────────────────────\n\n📌 Backup Picks\n"
         for c in backup:
             n += 1
-            out += (f"\n{n}) {c['match']}\n"
-                    f"   🏆 {c['league']}\n"
-                    f"   ⭐ Score: {c['score']}/10\n")
+            out += _draw_line(n, c)
     return out.strip()
 
 
@@ -658,6 +691,8 @@ def run_analysis():
             # ---- DRAW PATH ----
             draw_score = 0
             h2h = None
+            sym_score = 0
+            is_lock = False
             if passes_draw_filters(home, away, form_h, form_a):
                 base = score_draw_advanced(home, away, form_h, form_a)
 
@@ -671,9 +706,21 @@ def run_analysis():
                         h2h = get_h2h(home_id, away_id)
                     if h2h and h2h.get("draw_rate", 0) >= 0.30:
                         base += 2
-                draw_score = base
 
-            entry = {"match": match_label, "league": league_name, "score": draw_score}
+                # Stalemate Symmetry — extra 'Draw Awareness' layer (0-5)
+                sym_score = calculate_draw_symmetry(home, away)
+                draw_score = base + sym_score
+
+                # Golden pick rule: advanced score (post-H2H) ≥7 AND symmetry ≥4
+                is_lock = (base >= 7) and (sym_score >= 4)
+
+            entry = {
+                "match":   match_label,
+                "league":  league_name,
+                "score":   draw_score,
+                "sym":     sym_score,
+                "is_lock": is_lock,
+            }
             if match_label not in seen_draws:
                 if draw_score >= 8:
                     strong_draws.append(entry)
