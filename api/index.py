@@ -233,6 +233,11 @@ def get_standings(league_id, season):
                 "goals_for":     team["all"]["goals"]["for"],
                 "goals_against": team["all"]["goals"]["against"],
                 "goal_diff":     team.get("goalsDiff", 0),
+                # Home/Away splits — needed by the Advanced Stalemate brain
+                "home_played":   team.get("home", {}).get("played", 0),
+                "home_draws":    team.get("home", {}).get("draw",   0),
+                "away_played":   team.get("away", {}).get("played", 0),
+                "away_draws":    team.get("away", {}).get("draw",   0),
             }
         except (KeyError, TypeError):
             continue
@@ -326,18 +331,22 @@ def get_h2h(home_id, away_id):
 # ---------------------------------------------------------
 
 def passes_draw_filters(home, away, form_h, form_a):
+    """Hard Gates — Advanced Stalemate brain."""
     if not home or not away:
         return False
-    if abs(home["rank"] - away["rank"]) > 3:
-        return False
-    if abs(home["goal_diff"] - away["goal_diff"]) > 6:
-        return False
-    hr = home["draws"] / max(home["played"], 1)
-    ar = away["draws"] / max(away["played"], 1)
-    if (hr + ar) / 2 < 0.25:
-        return False
-    if not form_h or not form_a:
-        return False
+
+    # 1. PPG (Points Per Game) Parity Gate
+    ppg_h = (home["wins"] * 3 + home["draws"]) / max(home["played"], 1)
+    ppg_a = (away["wins"] * 3 + away["draws"]) / max(away["played"], 1)
+    if abs(ppg_h - ppg_a) > 0.75:
+        return False  # Too big of a quality gap
+
+    # 2. Total Goal "Chaos" Gate
+    avg_h = (home["goals_for"] + home["goals_against"]) / max(home["played"], 1)
+    avg_a = (away["goals_for"] + away["goals_against"]) / max(away["played"], 1)
+    if (avg_h + avg_a) / 2 > 3.0:
+        return False  # Exclude high-scoring/unstable games
+
     return True
 
 
@@ -345,31 +354,36 @@ def passes_draw_filters(home, away, form_h, form_a):
 # 7. SCORING — DRAW MARKET (base score, then conditional H2H)
 # ---------------------------------------------------------
 
-def score_draw_base(home, away, form_h, form_a):
+def score_draw_advanced(home, away, form_h, form_a):
+    """Advanced Stalemate — 10-point weighted scoring."""
     score = 0
-    gap = abs(home["rank"] - away["rank"])
-    if gap <= 1:
+
+    # Parity (3 pts) — PPG difference < 0.3
+    ppg_h = (home["wins"] * 3 + home["draws"]) / max(home["played"], 1)
+    ppg_a = (away["wins"] * 3 + away["draws"]) / max(away["played"], 1)
+    if abs(ppg_h - ppg_a) < 0.3:
         score += 3
-    elif gap <= 3:
-        score += 2
 
-    if abs(home["goal_diff"] - away["goal_diff"]) <= 5:
-        score += 2
-    if abs(home["goals_for"] - away["goals_for"]) <= 10:
-        score += 1
-
-    hr = home["draws"] / max(home["played"], 1)
-    ar = away["draws"] / max(away["played"], 1)
-    avg_dr = (hr + ar) / 2
-    if avg_dr >= 0.30:
+    # Low-Score Multiplier (3 pts) — combined avg goals per game < 2.4
+    avg_h = (home["goals_for"] + home["goals_against"]) / max(home["played"], 1)
+    avg_a = (away["goals_for"] + away["goals_against"]) / max(away["played"], 1)
+    if (avg_h + avg_a) / 2 < 2.4:
         score += 3
-    elif avg_dr >= 0.25:
-        score += 2
 
-    if (form_h.count("D") + form_a.count("D")) >= 3:
+    # Away Draw Specialist (2 pts) — away_draws / away_played > 30%
+    if away.get("away_played", 0) > 0:
+        if (away["away_draws"] / away["away_played"]) > 0.30:
+            score += 2
+
+    # Form Symmetry (2 pts) — both teams ≥ 2 draws in last 5
+    if form_h and form_a and form_h.count("D") >= 2 and form_a.count("D") >= 2:
         score += 2
 
     return score
+
+
+# Back-compat alias so other scorers (e.g. score_all_markets) keep working.
+score_draw_base = score_draw_advanced
 
 
 # ---------------------------------------------------------
@@ -608,7 +622,7 @@ def run_analysis():
             draw_score = 0
             h2h = None
             if passes_draw_filters(home, away, form_h, form_a):
-                base = score_draw_base(home, away, form_h, form_a)
+                base = score_draw_advanced(home, away, form_h, form_a)
 
                 # FIX 2 — only call H2H if base ≥ 5 AND not already cached
                 if base >= 5:
@@ -624,10 +638,10 @@ def run_analysis():
 
             entry = {"match": match_label, "league": league_name, "score": draw_score}
             if match_label not in seen_draws:
-                if draw_score >= 7:
+                if draw_score >= 8:
                     strong_draws.append(entry)
                     seen_draws.add(match_label)
-                elif draw_score == 6:
+                elif draw_score in (6, 7):
                     backup_draws.append(entry)
                     seen_draws.add(match_label)
 
