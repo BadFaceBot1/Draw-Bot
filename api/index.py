@@ -34,57 +34,236 @@ HEADERS  = {"x-apisports-key": API_FOOTBALL_KEY}
 
 
 # ---------------------------------------------------------
-# 2. ALLOWED LEAGUES (final expanded whitelist)
+# 2. ALLOWED LEAGUES — Self-Healing Whitelist
 # ---------------------------------------------------------
+# Define leagues by (country, name) profile instead of by hard-coded ID.
+# At startup, verify_and_fix_league_ids() calls /leagues once and
+# resolves the IDs against the live API catalog. If the API renumbers
+# leagues for a new season, the bot self-corrects with no code change.
+#
+# Each profile:
+#   country      : country name as published by API-Sports
+#   name         : canonical league name
+#   aliases      : alternative names the API may use
+#   suppression  : True for low-scoring leagues that get the +2 bonus
 
-ALLOWED_LEAGUES = {
-    137: "Serie B",
-    72:  "Serie C",
+TARGET_LEAGUES = [
+    # ----- Italy
+    {"country": "Italy",        "name": "Serie B",                 "aliases": []},
+    {"country": "Italy",        "name": "Serie C",                 "aliases": ["Serie C - Girone A", "Serie C Group A"]},
 
-    141: "Segunda Division",
-    138: "Primera RFEF",
-    142: "Segunda RFEF",
+    # ----- Spain
+    {"country": "Spain",        "name": "Segunda División",        "aliases": ["Segunda Division", "LaLiga 2", "La Liga 2"]},
+    {"country": "Spain",        "name": "Primera RFEF",            "aliases": ["Primera Federacion", "Primera División RFEF"]},
+    {"country": "Spain",        "name": "Segunda RFEF",            "aliases": ["Segunda Federacion", "Segunda División RFEF"]},
 
-    65:  "Ligue 2",
-    66:  "National",
+    # ----- France
+    {"country": "France",       "name": "Ligue 2",                 "aliases": []},
+    {"country": "France",       "name": "National 1",              "aliases": ["National", "Championnat National"]},
 
-    41:  "League One",
-    42:  "League Two",
+    # ----- England
+    {"country": "England",      "name": "League One",              "aliases": ["EFL League One"]},
+    {"country": "England",      "name": "League Two",              "aliases": ["EFL League Two"]},
 
-    78:  "3. Liga",
+    # ----- Germany
+    {"country": "Germany",      "name": "3. Liga",                 "aliases": ["3 Liga", "Liga 3"]},
 
-    89:  "Eerste Divisie",
+    # ----- Netherlands
+    {"country": "Netherlands",  "name": "Eerste Divisie",          "aliases": ["Keuken Kampioen Divisie"]},
 
-    94:  "Liga Portugal 2",
+    # ----- Portugal
+    {"country": "Portugal",     "name": "Liga Portugal 2",         "aliases": ["Segunda Liga", "Liga 2 Portugal", "LigaPro"]},
 
+    # ----- Belgium
+    {"country": "Belgium",      "name": "Challenger Pro League",   "aliases": ["First Division B", "1B Pro League"]},
+
+    # ----- Austria
+    {"country": "Austria",      "name": "2. Liga",                 "aliases": ["Erste Liga", "Admiral 2. Liga"]},
+
+    # ----- Switzerland
+    {"country": "Switzerland",  "name": "Challenge League",        "aliases": ["Brack.ch Challenge League"]},
+
+    # ----- Scandinavia / Nordics
+    {"country": "Sweden",       "name": "Superettan",              "aliases": []},
+    {"country": "Norway",       "name": "OBOS-ligaen",             "aliases": ["OBOS Ligaen", "1. divisjon", "Eliteserien 2"]},
+    {"country": "Denmark",      "name": "1. Division",             "aliases": ["NordicBet Liga", "Division 1"]},
+    {"country": "Finland",      "name": "Ykkönen",                 "aliases": ["Ykkonen", "Ykkösliiga"]},
+
+    # ----- Eastern Europe
+    {"country": "Romania",      "name": "Liga II",                 "aliases": ["Liga 2"]},
+    {"country": "Poland",       "name": "I Liga",                  "aliases": ["1 Liga", "Fortuna 1 Liga"]},
+    {"country": "Czech-Republic","name": "FNL",                    "aliases": ["Fortuna Národní Liga", "FORTUNA:LIGA 2", "Czech Liga 2"]},
+    {"country": "Turkey",       "name": "1. Lig",                  "aliases": ["TFF First League", "1 Lig"]},
+    {"country": "Greece",       "name": "Super League 2",          "aliases": ["Super League 2 - Group A"]},
+    {"country": "Hungary",      "name": "NB II",                   "aliases": ["NB 2", "Nemzeti Bajnokság II"]},
+
+    # ----- South America
+    {"country": "Argentina",    "name": "Primera Nacional",        "aliases": ["Primera B Nacional"]},
+    {"country": "Paraguay",     "name": "Division Intermedia",     "aliases": ["División Intermedia"]},
+    {"country": "Uruguay",      "name": "Segunda División",        "aliases": ["Segunda Division", "Segunda División Profesional"]},
+    {"country": "Colombia",     "name": "Primera B",               "aliases": ["Torneo BetPlay"]},
+    {"country": "Chile",        "name": "Primera B",               "aliases": ["Campeonato Ascenso"]},
+    {"country": "Peru",         "name": "Liga 2",                  "aliases": ["Segunda División"]},
+
+    # ----- Brazil
+    {"country": "Brazil",       "name": "Serie B",                 "aliases": ["Brasileirão Série B"]},
+    {"country": "Brazil",       "name": "Serie C",                 "aliases": ["Brasileirão Série C"]},
+
+    # ----- Suppression leagues (low-scoring → +2 bonus, top-of-list priority)
+    {"country": "Iran",         "name": "Persian Gulf Pro League", "aliases": ["Iran Pro League", "Pro League"], "suppression": True},
+    {"country": "South-Africa", "name": "Premier Soccer League",   "aliases": ["PSL", "DSTV Premiership", "Premiership"], "suppression": True},
+    {"country": "Morocco",      "name": "Botola Pro",              "aliases": ["Botola Pro Inwi", "Botola"], "suppression": True},
+    {"country": "Algeria",      "name": "Ligue 1",                 "aliases": ["Ligue Professionnelle 1", "Ligue Professionnelle"], "suppression": True},
+]
+
+
+# Hard-coded fallback used only if the live /leagues call fails
+# (e.g. API key suspended, network down). Keeps the bot bootable.
+FALLBACK_LEAGUES = {
+    137: "Serie B", 72: "Serie C",
+    141: "Segunda Division", 138: "Primera RFEF", 142: "Segunda RFEF",
+    65: "Ligue 2", 66: "National",
+    41: "League One", 42: "League Two",
+    78: "3. Liga",
+    89: "Eerste Divisie",
+    94: "Liga Portugal 2",
     144: "Challenger Pro League",
-
     218: "2. Liga",
-
     207: "Challenge League",
-
-    113: "Superettan",
-    104: "OBOS Ligaen",
-    119: "Division 1",
-    244: "Ykkonen",
-
-    284: "Liga II Romania",
-    106: "I Liga Poland",
-    345: "FNL Czech",
-    203: "1. Lig Turkey",
-    210: "Super League 2 Greece",
-    271: "NB II Hungary",
-
-    128: "Primera Nacional Argentina",
-    289: "Division Intermedia Paraguay",
-    292: "Segunda Uruguay",
-    239: "Primera B Colombia",
-    266: "Primera B Chile",
+    113: "Superettan", 104: "OBOS Ligaen", 119: "Division 1", 244: "Ykkonen",
+    284: "Liga II Romania", 106: "I Liga Poland", 345: "FNL Czech",
+    203: "1. Lig Turkey", 210: "Super League 2 Greece", 271: "NB II Hungary",
+    128: "Primera Nacional Argentina", 289: "Division Intermedia Paraguay",
+    292: "Segunda Uruguay", 239: "Primera B Colombia", 266: "Primera B Chile",
     281: "Liga 2 Peru",
-
-    71:  "Serie B Brazil",
-    73:  "Serie C Brazil",
+    71: "Serie B Brazil", 73: "Serie C Brazil",
+    290: "Iran Pro League", 288: "South Africa PSL",
+    200: "Morocco Botola Pro", 188: "Algeria Ligue 1",
 }
+FALLBACK_SUPPRESSION = {290, 288, 200, 188}
+
+
+# Populated by verify_and_fix_league_ids() at startup
+ALLOWED_LEAGUES     = {}
+SUPPRESSION_LEAGUES = set()
+
+
+def _norm(s):
+    """Lowercase + strip diacritics + collapse punctuation for fuzzy match."""
+    if not s:
+        return ""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return "".join(c.lower() for c in s if c.isalnum() or c.isspace()).strip()
+
+
+def _league_matches(api_name, target_name, aliases):
+    """Match API league name against target + aliases (normalized)."""
+    api_n = _norm(api_name)
+    candidates = [target_name] + (aliases or [])
+    for cand in candidates:
+        cand_n = _norm(cand)
+        if api_n == cand_n:
+            return True
+    return False
+
+
+def verify_and_fix_league_ids(targets):
+    """Resolve TARGET_LEAGUES → {id: name} via a single /leagues call.
+
+    Returns (allowed_dict, suppression_set, report_list).
+    Falls back to the hard-coded baseline if the API is unreachable.
+    """
+    print("[INIT] Verifying league IDs against live API catalog...")
+    data = _api_get("/leagues", {"current": "true"})
+
+    if not data or not data.get("response"):
+        print("[INIT] ⚠️  /leagues call failed — using hard-coded fallback whitelist.")
+        return dict(FALLBACK_LEAGUES), set(FALLBACK_SUPPRESSION), [
+            {"status": "FALLBACK", "reason": "API unreachable"}
+        ]
+
+    api_leagues = data["response"]   # list of {league:{id,name,type}, country:{name}}
+    allowed = {}
+    suppression = set()
+    report = []
+
+    # Index API leagues by normalized country for fast per-country lookup
+    by_country = {}
+    for entry in api_leagues:
+        lg = entry.get("league") or {}
+        ct = entry.get("country") or {}
+        if lg.get("type") != "League":   # skip Cups, Friendlies, etc.
+            continue
+        ck = _norm(ct.get("name"))
+        by_country.setdefault(ck, []).append({
+            "id":   lg.get("id"),
+            "name": lg.get("name"),
+            "country": ct.get("name"),
+        })
+
+    for tgt in targets:
+        country_n = _norm(tgt["country"])
+        candidates = by_country.get(country_n, [])
+        # Some API countries use hyphens vs spaces ("South-Africa" vs "South Africa")
+        if not candidates:
+            country_alt = _norm(tgt["country"].replace("-", " "))
+            candidates = by_country.get(country_alt, [])
+
+        match = next(
+            (c for c in candidates
+             if _league_matches(c["name"], tgt["name"], tgt.get("aliases", []))),
+            None,
+        )
+
+        if match:
+            allowed[match["id"]] = match["name"]
+            if tgt.get("suppression"):
+                suppression.add(match["id"])
+            print(f"[INIT] ✅  {tgt['country']:<14} {tgt['name']:<32} → ID {match['id']}")
+            report.append({
+                "status":  "OK",
+                "country": tgt["country"],
+                "target":  tgt["name"],
+                "api_name": match["name"],
+                "id":      match["id"],
+                "suppression": bool(tgt.get("suppression")),
+            })
+        else:
+            print(f"[INIT] ⚠️   {tgt['country']:<14} {tgt['name']:<32} → NOT FOUND")
+            report.append({
+                "status":  "NOT_FOUND",
+                "country": tgt["country"],
+                "target":  tgt["name"],
+                "candidates": [c["name"] for c in candidates][:5],
+            })
+
+    print(f"[INIT] Whitelist resolved: {len(allowed)} leagues "
+          f"({len(suppression)} suppression).")
+    return allowed, suppression, report
+
+
+def _bootstrap_whitelist():
+    """Run once at import. Safe under cold-start (Vercel) and local dev."""
+    global ALLOWED_LEAGUES, SUPPRESSION_LEAGUES, _LAST_VERIFY_REPORT
+    try:
+        allowed, suppression, report = verify_and_fix_league_ids(TARGET_LEAGUES)
+        if not allowed:                                  # all targets failed
+            allowed     = dict(FALLBACK_LEAGUES)
+            suppression = set(FALLBACK_SUPPRESSION)
+            report.append({"status": "FALLBACK", "reason": "no targets resolved"})
+        ALLOWED_LEAGUES.update(allowed)
+        SUPPRESSION_LEAGUES.update(suppression)
+        _LAST_VERIFY_REPORT = report
+    except Exception as e:
+        print(f"[INIT] ❌  Whitelist bootstrap crashed: {e} — using fallback.")
+        ALLOWED_LEAGUES.update(FALLBACK_LEAGUES)
+        SUPPRESSION_LEAGUES.update(FALLBACK_SUPPRESSION)
+        _LAST_VERIFY_REPORT = [{"status": "FALLBACK", "reason": str(e)}]
+
+
+_LAST_VERIFY_REPORT = []   # populated by _bootstrap_whitelist (called below)
 
 
 # ---------------------------------------------------------
@@ -176,6 +355,11 @@ def _api_get(path, params=None, timeout=10, retries=2, retry_delay=0.6):
             return None
     print(f"[API GIVE-UP] {path} after retries (last: {last_err})")
     return None
+
+
+# Bootstrap the self-healing whitelist now that _api_get exists.
+# Runs once per process (cold-start on Vercel, on import locally).
+_bootstrap_whitelist()
 
 
 # ---------------------------------------------------------
@@ -355,8 +539,8 @@ def passes_draw_filters(home, away, form_h, form_a):
 # 7. SCORING — DRAW MARKET (base score, then conditional H2H)
 # ---------------------------------------------------------
 
-def score_draw_advanced(home, away, form_h, form_a):
-    """Advanced Stalemate — 10-point weighted scoring."""
+def score_draw_advanced(home, away, form_h, form_a, league_id=None):
+    """Advanced Stalemate — weighted scoring (10 pts + optional league bonus)."""
     score = 0
 
     # Parity (3 pts) — PPG difference < 0.3
@@ -378,6 +562,10 @@ def score_draw_advanced(home, away, form_h, form_a):
 
     # Form Symmetry (2 pts) — both teams ≥ 2 draws in last 5
     if form_h and form_a and form_h.count("D") >= 2 and form_a.count("D") >= 2:
+        score += 2
+
+    # League-Specific Suppression Bonus (+2) — tactical low-scoring leagues
+    if league_id in SUPPRESSION_LEAGUES:
         score += 2
 
     return score
@@ -694,7 +882,7 @@ def run_analysis():
             sym_score = 0
             is_lock = False
             if passes_draw_filters(home, away, form_h, form_a):
-                base = score_draw_advanced(home, away, form_h, form_a)
+                base = score_draw_advanced(home, away, form_h, form_a, league_id)
 
                 # FIX 2 — only call H2H if base ≥ 5 AND not already cached
                 if base >= 5:
@@ -715,11 +903,12 @@ def run_analysis():
                 is_lock = (base >= 7) and (sym_score >= 4)
 
             entry = {
-                "match":   match_label,
-                "league":  league_name,
-                "score":   draw_score,
-                "sym":     sym_score,
-                "is_lock": is_lock,
+                "match":     match_label,
+                "league":    league_name,
+                "league_id": league_id,
+                "score":     draw_score,
+                "sym":       sym_score,
+                "is_lock":   is_lock,
             }
             if match_label not in seen_draws:
                 if draw_score >= 8:
@@ -742,7 +931,16 @@ def run_analysis():
             print(f"[ERROR] Skipping match: {e}")
             continue
 
-    strong_draws.sort(key=lambda x: x["score"], reverse=True)
+    # Sort priority for Strong Draws:
+    #   1. Suppression-league picks with high symmetry (sym ≥ 4) bubble to the top
+    #   2. Then by total score
+    #   3. Then by symmetry score (tiebreaker)
+    def _strong_key(x):
+        priority = 1 if (x.get("league_id") in SUPPRESSION_LEAGUES
+                         and x.get("sym", 0) >= 4) else 0
+        return (priority, x["score"], x.get("sym", 0))
+
+    strong_draws.sort(key=_strong_key, reverse=True)
     backup_draws.sort(key=lambda x: x["score"], reverse=True)
     print(f"[INFO] Strong draws: {len(strong_draws)}")
     print(f"[INFO] Backup draws: {len(backup_draws)}")
@@ -967,6 +1165,24 @@ def set_webhook():
     except Exception as e:
         print(f"[SET_WEBHOOK ERROR] {e}")
         return f"❌ Error: {e}", 500
+
+
+@app.route("/api/verify_leagues", methods=["GET"])
+def verify_leagues_endpoint():
+    """On-demand re-verification of the league whitelist.
+       Returns a JSON report showing each target league's resolved API ID
+       (or NOT_FOUND with the candidates it considered)."""
+    from flask import jsonify
+    allowed, suppression, report = verify_and_fix_league_ids(TARGET_LEAGUES)
+    if allowed:
+        ALLOWED_LEAGUES.clear(); ALLOWED_LEAGUES.update(allowed)
+        SUPPRESSION_LEAGUES.clear(); SUPPRESSION_LEAGUES.update(suppression)
+    return jsonify({
+        "resolved":           len([r for r in report if r.get("status") == "OK"]),
+        "not_found":          len([r for r in report if r.get("status") == "NOT_FOUND"]),
+        "suppression_count":  len(suppression),
+        "report":             report,
+    }), 200
 
 
 @app.route("/api/run_daily", methods=["GET", "POST"])
