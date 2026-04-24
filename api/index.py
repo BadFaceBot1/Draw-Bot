@@ -5,6 +5,7 @@
 # =========================================================
 
 import os
+import math
 import time
 import asyncio
 import threading
@@ -405,6 +406,21 @@ def _conceding_rate(team):
     return team["goals_against"] / p
 
 
+def _scored_in_rate(team):
+    """Proxy for 'matches in which team scored at least 1 goal'.
+       Uses a Poisson-style mapping from goals/game (1 - e^(-λ))."""
+    p = max(team["played"], 1)
+    lam = team["goals_for"] / p
+    return 1 - math.exp(-lam)
+
+
+def _clean_sheet_rate(team):
+    """Proxy for 'clean sheet rate' from goals-against per game (e^(-λ))."""
+    p = max(team["played"], 1)
+    lam = team["goals_against"] / p
+    return math.exp(-lam)
+
+
 def score_double_chance(home, away, form_h, form_a, h2h):
     score = 0
     stronger = home if home["rank"] <= away["rank"] else away
@@ -445,6 +461,10 @@ def score_over_15(home, away, form_h, form_a, h2h):
     elif _scoring_rate(home) >= 0.8 or _scoring_rate(away) >= 0.8:
         score += 1
 
+    # Market-specific weight: both teams score in 75%+ of their matches
+    if _scored_in_rate(home) >= 0.75 and _scored_in_rate(away) >= 0.75:
+        score += 3
+
     if h2h and h2h["over15_rate"] >= 0.80:
         score += 3
     elif h2h and h2h["over15_rate"] >= 0.60:
@@ -467,6 +487,11 @@ def score_under_35(home, away, form_h, form_a, h2h):
     elif _conceding_rate(home) <= 1.3 or _conceding_rate(away) <= 1.3:
         score += 1
 
+    # Market-specific weight: combined clean sheet rate > 40%
+    combined_cs = (_clean_sheet_rate(home) + _clean_sheet_rate(away)) / 2
+    if combined_cs > 0.40:
+        score += 3
+
     if h2h and h2h["under35_rate"] >= 0.80:
         score += 3
     elif h2h and h2h["under35_rate"] >= 0.60:
@@ -475,6 +500,11 @@ def score_under_35(home, away, form_h, form_a, h2h):
 
 
 def score_btts_yes(home, away, form_h, form_a, h2h):
+    # Hard gate: only suggest if both teams' goal-diff sits in [-5, +5]
+    # (high parity, competitive scoring).
+    if not (-5 <= home["goal_diff"] <= 5) or not (-5 <= away["goal_diff"] <= 5):
+        return 0
+
     score = 0
     sh = _scoring_rate(home)
     sa = _scoring_rate(away)
@@ -496,11 +526,18 @@ def score_btts_yes(home, away, form_h, form_a, h2h):
 
 
 def score_draw_no_bet(home, away, form_h, form_a, h2h):
-    score = 0
     stronger = home if home["rank"] <= away["rank"] else away
     weaker   = away if stronger is home else home
 
-    win_rate = stronger["wins"] / max(stronger["played"], 1)
+    # Hard gate: only suggest DNB on a side with loss-rate < 20% AND draw-rate > 25%
+    s_played = max(stronger["played"], 1)
+    s_loss_rate = stronger["losses"] / s_played
+    s_draw_rate = stronger["draws"]  / s_played
+    if not (s_loss_rate < 0.20 and s_draw_rate > 0.25):
+        return 0
+
+    score = 0
+    win_rate = stronger["wins"] / s_played
     if win_rate >= 0.50:   score += 4
     elif win_rate >= 0.40: score += 3
     elif win_rate >= 0.33: score += 2
@@ -672,10 +709,19 @@ def run_analysis():
     print("[INFO] No strong draws → building accumulator...")
     acca_candidates = []
     seen_acca = set()                              # FIX 5 — dedupe accumulator
+    discarded_gated = 0
     for e in enriched:
         if e["label"] in seen_acca:
             continue
         markets = score_all_markets(e["home"], e["away"], e["form_h"], e["form_a"], e["h2h"])
+
+        # Discard rule: if 2+ markets returned 0 due to hard gates,
+        # the match is structurally unfit — drop it entirely.
+        zero_markets = sum(1 for v in markets.values() if v == 0)
+        if zero_markets >= 2:
+            discarded_gated += 1
+            continue
+
         best_mkt, best_score = max(markets.items(), key=lambda kv: kv[1])
         if best_score >= 7:
             acca_candidates.append({
@@ -687,7 +733,8 @@ def run_analysis():
             seen_acca.add(e["label"])
 
     acca_candidates.sort(key=lambda x: x["score"], reverse=True)
-    print(f"[INFO] Accumulator candidates: {len(acca_candidates)}")
+    print(f"[INFO] Accumulator candidates: {len(acca_candidates)} "
+          f"(discarded by hard gates: {discarded_gated})")
 
     # FIX 6 — graceful fallback if accumulator can't reach the 6-pick minimum
     if len(acca_candidates) < 6:
