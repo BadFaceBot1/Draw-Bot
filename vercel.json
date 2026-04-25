@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 300
+    }
+  },
   "routes": [
     {
       "src": "/api/webhook",
@@ -6,6 +11,10 @@
     },
     {
       "src": "/api/set_webhook",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/api/verify_leagues",
       "dest": "/api/index.py"
     },
     {
