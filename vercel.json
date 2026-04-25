@@ -1,16 +1,16 @@
 {
   "version": 2,
-  "functions": {
-    "api/index.py": {
-      "runtime": "@vercel/python",
-      "maxDuration": 60
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": { "maxDuration": 300 }
     }
-  },
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index.py" },
-    { "source": "/", "destination": "/api/index.py" }
   ],
-  "crons": [
-    { "path": "/api/run_daily", "schedule": "5 0 * * *" }
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
+    }
   ]
 }
