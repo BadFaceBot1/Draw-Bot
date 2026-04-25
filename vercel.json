@@ -1,32 +1,8 @@
 {
   "functions": {
-    "api/index.py": {
-      "maxDuration": 300
-    }
+    "api/*.py": { "maxDuration": 300 }
   },
-  "routes": [
-    {
-      "src": "/api/webhook",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/api/set_webhook",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/api/verify_leagues",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/api/run_daily",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/",
-      "dest": "/api/index.py"
-    }
-  ],
-  "crons": [
-    { "path": "/api/run_daily", "schedule": "5 0 * * *" }
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index.py" }
   ]
 }
