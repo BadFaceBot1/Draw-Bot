@@ -836,10 +836,21 @@ def format_accumulator(picks, reserves):
 # 10. MAIN ANALYSIS — DRAW MODE first, ACCUMULATOR fallback
 # ---------------------------------------------------------
 
-def run_analysis():
-    """Pipeline: scan fixtures → score draw → if no draws, build accumulator."""
+def run_analysis(progress=None):
+    """Pipeline: scan fixtures → score draw → if no draws, build accumulator.
+
+    progress: optional dict shared with a watcher coroutine. Updated in-place
+              with {"stage", "current", "total", "done"} so a background ticker
+              can report 'Still working... [N/M]' every 60 s.
+    """
     global daily_results
     print("[INFO] Running draw analysis...")
+
+    if progress is not None:
+        progress["stage"]   = "fetching_fixtures"
+        progress["current"] = 0
+        progress["total"]   = 0
+        progress["done"]    = False
 
     matches = get_today_matches()
 
@@ -848,7 +859,13 @@ def run_analysis():
     enriched     = []                 # for accumulator fallback
     seen_draws   = set()              # dedupe across draw lists
 
-    for game in matches:
+    if progress is not None:
+        progress["stage"] = "analysing"
+        progress["total"] = len(matches)
+
+    for idx, game in enumerate(matches, start=1):
+        if progress is not None:
+            progress["current"] = idx
         try:
             league = game.get("league", {})
             league_id   = league.get("id")
@@ -1034,10 +1051,71 @@ async def strongdraws_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("📊 No results yet. Use /testdraws.")
 
 
+async def _run_analysis_with_progress(bot, chat_id):
+    """Background worker:
+       1. starts run_analysis() on a thread executor (it's CPU+IO sync),
+       2. pings the chat every 60 s with 'Still working... [N/M]',
+       3. sends the final result when analysis returns.
+       Survives until run_analysis completes — protected by Vercel
+       maxDuration=300 (vercel.json) so the function stays alive."""
+    progress = {"stage": "starting", "current": 0, "total": 0, "done": False}
+    loop = asyncio.get_running_loop()
+
+    # Kick off the sync analysis on the default executor so this coroutine
+    # remains free to send progress pings.
+    analysis_future = loop.run_in_executor(None, run_analysis, progress)
+
+    async def _ticker():
+        # Wait 60 s, then ping every 60 s until analysis is done.
+        try:
+            while not analysis_future.done():
+                await asyncio.sleep(60)
+                if analysis_future.done():
+                    break
+                cur, tot = progress.get("current", 0), progress.get("total", 0)
+                stage = progress.get("stage", "working")
+                msg = (f"⏳ Still working... [{cur}/{tot}] ({stage})"
+                       if tot else f"⏳ Still working... ({stage})")
+                try:
+                    await bot.send_message(chat_id=chat_id, text=msg)
+                except Exception as e:
+                    print(f"[TESTDRAWS PING ERROR] {e}")
+        except asyncio.CancelledError:
+            pass
+
+    ticker_task = asyncio.create_task(_ticker())
+
+    try:
+        result = await analysis_future
+    except Exception as e:
+        print(f"[TESTDRAWS ANALYSIS ERROR] {e}")
+        ticker_task.cancel()
+        try:
+            await bot.send_message(chat_id=chat_id, text=f"❌ Analysis failed: {e}")
+        except Exception:
+            pass
+        return
+
+    progress["done"] = True
+    ticker_task.cancel()
+
+    try:
+        await bot.send_message(chat_id=chat_id, text=result or "⚽ No results.")
+    except Exception as e:
+        print(f"[TESTDRAWS REPLY ERROR] {e}")
+
+
 async def testdraws_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Running full analysis now, please wait...")
-    result = run_analysis()
-    await update.message.reply_text(result)
+    """Immediate ACK, analysis runs in background — keeps Telegram happy
+       and avoids the Vercel function timeout on the webhook handler."""
+    await update.message.reply_text(
+        "🔍 Analysis started in the background.\n"
+        "You'll get a progress ping every 60 s and the final picks when ready."
+    )
+    chat_id = update.effective_chat.id
+    # We're already running on _bg_loop, so create_task is safe and
+    # this handler returns immediately → webhook ACKs Telegram fast.
+    asyncio.create_task(_run_analysis_with_progress(context.bot, chat_id))
 
 
 async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1139,12 +1217,16 @@ def home():
 
 @app.route("/api/webhook", methods=["POST"])
 def webhook():
-    """FIX 10 — Always return 200, never crash, log any errors."""
+    """Fire-and-forget: schedule the update on the background loop and
+       ACK Telegram immediately (<10 ms typical). Long-running handlers
+       like /testdraws now finish on the bg loop without blocking the
+       webhook response — protected by Vercel maxDuration=300."""
     data = flask_request.get_json(force=True, silent=True)
     if not data:
         return "ok", 200
     try:
-        _run_async(process_update(data))
+        # No .result() → don't wait. The coroutine runs on _bg_loop.
+        asyncio.run_coroutine_threadsafe(process_update(data), _bg_loop)
     except Exception as e:
         print(f"[WEBHOOK ERROR] {e}")
     return "ok", 200
