@@ -1078,17 +1078,27 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
 # ---------------------------------------------------------
 # 12. TELEGRAM APPLICATION  (Polling mode)
 # ---------------------------------------------------------
+# post_init is called by PTB *after* the app is fully initialised
+# but *before* polling starts — the only safe place to call bot APIs
+# at startup. This avoids the asyncio.get_event_loop() conflict that
+# caused "NameError: name 'start' is not defined" on Python 3.10+.
 
-tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
+async def _post_init(application):
+    """Register slash-command descriptions in the Telegram menu."""
+    await application.bot.set_my_commands(BOT_COMMANDS)
+    print("[INFO] Bot commands registered.")
+
+
+tg_app = (
+    Application.builder()
+    .token(TELEGRAM_TOKEN)
+    .post_init(_post_init)
+    .build()
+)
 tg_app.add_handler(CommandHandler("start",        start_command))
 tg_app.add_handler(CommandHandler("strongdraws",  strongdraws_command))
 tg_app.add_handler(CommandHandler("testdraws",    testdraws_command))
 tg_app.add_handler(CommandHandler("debugmatches", debugmatches_command))
-
-
-async def _set_bot_commands():
-    """Register slash-command descriptions visible in the Telegram menu."""
-    await tg_app.bot.set_my_commands(BOT_COMMANDS)
 
 
 # ---------------------------------------------------------
@@ -1144,65 +1154,15 @@ def _run_flask():
 # 14. ENTRYPOINT — Flask on daemon thread, PTB polling on main
 # ---------------------------------------------------------
 
-# ... (Keep all your scoring and analysis functions above exactly as they are)
-
 if __name__ == "__main__":
-    # 1. Resolve IDs
-    verify_and_fix_league_ids(TARGET_LEAGUES)
+    # 1. Start Flask in the background so Render sees an HTTP service.
+    flask_thread = threading.Thread(target=_run_flask, daemon=True)
+    flask_thread.start()
 
-    # 2. Start Flask in background for Render health checks
-    # We use port 10000 or the environment PORT
-    port = int(os.getenv("PORT", 10000))
-    threading.Thread(target=lambda: server.run(host="0.0.0.0", port=port), daemon=True).start()
-    
-    # 3. Create the application
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # 4. Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("testdraws", testdraws))
-    application.add_handler(CommandHandler("strongdraws", strongdraws))
-    
-    # 5. Fix: Manual Loop Management for Render
-    print(f"🚀 Bot starting on port {port}...")
-    
-    # This specifically fixes the 'No current event loop' error
-    import asyncio
-    try:
-        application.run_polling(close_loop=False)
-    except RuntimeError:
-        # Fallback for environments where the loop is already running
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        application.run_polling()
-# ... (Keep all your scoring and analysis functions above exactly as they are)
-
-if __name__ == "__main__":
-    # 1. Resolve IDs
-    verify_and_fix_league_ids(TARGET_LEAGUES)
-
-    # 2. Start Flask in background for Render health checks
-    # We use port 10000 or the environment PORT
-    port = int(os.getenv("PORT", 10000))
-    threading.Thread(target=lambda: server.run(host="0.0.0.0", port=port), daemon=True).start()
-    
-    # 3. Create the application
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # 4. Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("testdraws", testdraws))
-    application.add_handler(CommandHandler("strongdraws", strongdraws))
-    
-    # 5. Fix: Manual Loop Management for Render
-    print(f"🚀 Bot starting on port {port}...")
-    
-    # This specifically fixes the 'No current event loop' error
-    import asyncio
-    try:
-        application.run_polling(close_loop=False)
-    except RuntimeError:
-        # Fallback for environments where the loop is already running
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        application.run_polling()
+    # 2. Start long-polling — blocks the main thread (intended).
+    #    post_init (defined in section 12) handles bot-command registration
+    #    automatically before polling begins, with no event-loop conflicts.
+    #    drop_pending_updates=True discards messages that arrived while
+    #    the bot was offline, preventing a replay flood on restart.
+    print("[INFO] Starting Telegram polling...")
+    tg_app.run_polling(drop_pending_updates=True)
