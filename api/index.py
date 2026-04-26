@@ -1078,27 +1078,17 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
 # ---------------------------------------------------------
 # 12. TELEGRAM APPLICATION  (Polling mode)
 # ---------------------------------------------------------
-# post_init is called by PTB *after* the app is fully initialised
-# but *before* polling starts — the only safe place to call bot APIs
-# at startup. This avoids the asyncio.get_event_loop() conflict that
-# caused "NameError: name 'start' is not defined" on Python 3.10+.
 
-async def _post_init(application):
-    """Register slash-command descriptions in the Telegram menu."""
-    await application.bot.set_my_commands(BOT_COMMANDS)
-    print("[INFO] Bot commands registered.")
-
-
-tg_app = (
-    Application.builder()
-    .token(TELEGRAM_TOKEN)
-    .post_init(_post_init)
-    .build()
-)
+tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
 tg_app.add_handler(CommandHandler("start",        start_command))
 tg_app.add_handler(CommandHandler("strongdraws",  strongdraws_command))
 tg_app.add_handler(CommandHandler("testdraws",    testdraws_command))
 tg_app.add_handler(CommandHandler("debugmatches", debugmatches_command))
+
+
+async def _set_bot_commands():
+    """Register slash-command descriptions visible in the Telegram menu."""
+    await tg_app.bot.set_my_commands(BOT_COMMANDS)
 
 
 # ---------------------------------------------------------
@@ -1159,10 +1149,11 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=_run_flask, daemon=True)
     flask_thread.start()
 
-    # 2. Start long-polling — blocks the main thread (intended).
-    #    post_init (defined in section 12) handles bot-command registration
-    #    automatically before polling begins, with no event-loop conflicts.
-    #    drop_pending_updates=True discards messages that arrived while
-    #    the bot was offline, preventing a replay flood on restart.
+    # 2. Register bot commands once before polling begins.
+    asyncio.get_event_loop().run_until_complete(_set_bot_commands())
+
+    # 3. Start long-polling — blocks the main thread (intended).
+    #    drop_pending_updates=True discards any messages that arrived
+    #    while the bot was offline, preventing a replay flood on restart.
     print("[INFO] Starting Telegram polling...")
     tg_app.run_polling(drop_pending_updates=True)
