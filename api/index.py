@@ -1,7 +1,7 @@
 # =========================================================
 #  TELEGRAM STRONG-DRAW PREDICTOR BOT
 #  Provider : API-Sports (v3.football.api-sports.io)
-#  Runtime  : Vercel webhook + cron (also runnable locally)
+#  Runtime  : Render Web Service — Polling + Flask keepalive
 # =========================================================
 
 import os
@@ -836,21 +836,10 @@ def format_accumulator(picks, reserves):
 # 10. MAIN ANALYSIS — DRAW MODE first, ACCUMULATOR fallback
 # ---------------------------------------------------------
 
-def run_analysis(progress=None):
-    """Pipeline: scan fixtures → score draw → if no draws, build accumulator.
-
-    progress: optional dict shared with a watcher coroutine. Updated in-place
-              with {"stage", "current", "total", "done"} so a background ticker
-              can report 'Still working... [N/M]' every 60 s.
-    """
+def run_analysis():
+    """Pipeline: scan fixtures → score draw → if no draws, build accumulator."""
     global daily_results
     print("[INFO] Running draw analysis...")
-
-    if progress is not None:
-        progress["stage"]   = "fetching_fixtures"
-        progress["current"] = 0
-        progress["total"]   = 0
-        progress["done"]    = False
 
     matches = get_today_matches()
 
@@ -859,13 +848,7 @@ def run_analysis(progress=None):
     enriched     = []                 # for accumulator fallback
     seen_draws   = set()              # dedupe across draw lists
 
-    if progress is not None:
-        progress["stage"] = "analysing"
-        progress["total"] = len(matches)
-
-    for idx, game in enumerate(matches, start=1):
-        if progress is not None:
-            progress["current"] = idx
+    for game in matches:
         try:
             league = game.get("league", {})
             league_id   = league.get("id")
@@ -1051,71 +1034,10 @@ async def strongdraws_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("📊 No results yet. Use /testdraws.")
 
 
-async def _run_analysis_with_progress(bot, chat_id):
-    """Background worker:
-       1. starts run_analysis() on a thread executor (it's CPU+IO sync),
-       2. pings the chat every 60 s with 'Still working... [N/M]',
-       3. sends the final result when analysis returns.
-       Survives until run_analysis completes — protected by Vercel
-       maxDuration=300 (vercel.json) so the function stays alive."""
-    progress = {"stage": "starting", "current": 0, "total": 0, "done": False}
-    loop = asyncio.get_running_loop()
-
-    # Kick off the sync analysis on the default executor so this coroutine
-    # remains free to send progress pings.
-    analysis_future = loop.run_in_executor(None, run_analysis, progress)
-
-    async def _ticker():
-        # Wait 60 s, then ping every 60 s until analysis is done.
-        try:
-            while not analysis_future.done():
-                await asyncio.sleep(60)
-                if analysis_future.done():
-                    break
-                cur, tot = progress.get("current", 0), progress.get("total", 0)
-                stage = progress.get("stage", "working")
-                msg = (f"⏳ Still working... [{cur}/{tot}] ({stage})"
-                       if tot else f"⏳ Still working... ({stage})")
-                try:
-                    await bot.send_message(chat_id=chat_id, text=msg)
-                except Exception as e:
-                    print(f"[TESTDRAWS PING ERROR] {e}")
-        except asyncio.CancelledError:
-            pass
-
-    ticker_task = asyncio.create_task(_ticker())
-
-    try:
-        result = await analysis_future
-    except Exception as e:
-        print(f"[TESTDRAWS ANALYSIS ERROR] {e}")
-        ticker_task.cancel()
-        try:
-            await bot.send_message(chat_id=chat_id, text=f"❌ Analysis failed: {e}")
-        except Exception:
-            pass
-        return
-
-    progress["done"] = True
-    ticker_task.cancel()
-
-    try:
-        await bot.send_message(chat_id=chat_id, text=result or "⚽ No results.")
-    except Exception as e:
-        print(f"[TESTDRAWS REPLY ERROR] {e}")
-
-
 async def testdraws_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Immediate ACK, analysis runs in background — keeps Telegram happy
-       and avoids the Vercel function timeout on the webhook handler."""
-    await update.message.reply_text(
-        "🔍 Analysis started in the background.\n"
-        "You'll get a progress ping every 60 s and the final picks when ready."
-    )
-    chat_id = update.effective_chat.id
-    # We're already running on _bg_loop, so create_task is safe and
-    # this handler returns immediately → webhook ACKs Telegram fast.
-    asyncio.create_task(_run_analysis_with_progress(context.bot, chat_id))
+    await update.message.reply_text("🔍 Running full analysis now, please wait...")
+    result = run_analysis()
+    await update.message.reply_text(result)
 
 
 async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1154,12 +1076,7 @@ async def debugmatches_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ---------------------------------------------------------
-# 12. GLOBAL TELEGRAM APPLICATION  (FIX 1 — built once, reused)
-#
-# IMPORTANT: do NOT name this variable `application` — Vercel's Python
-# runtime auto-detects WSGI by looking for a module-level `application`
-# or `app`. The Flask WSGI is `app`; this Telegram object must use a
-# different name or Vercel throws "could not determine application interface".
+# 12. TELEGRAM APPLICATION  (Polling mode)
 # ---------------------------------------------------------
 
 tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -1169,42 +1086,16 @@ tg_app.add_handler(CommandHandler("testdraws",    testdraws_command))
 tg_app.add_handler(CommandHandler("debugmatches", debugmatches_command))
 
 
-# --- Persistent background event loop ----------------------------------
-# PTB's httpx.AsyncClient is bound to the loop it was initialised in.
-# Flask's per-request asyncio.run() spawns a new loop each time, which
-# would orphan that client → "Event loop is closed". Instead we run ONE
-# loop on a daemon thread and dispatch every coroutine onto it.
-# -----------------------------------------------------------------------
-
-_bg_loop = asyncio.new_event_loop()
-
-
-def _bg_loop_runner():
-    asyncio.set_event_loop(_bg_loop)
-    _bg_loop.run_forever()
-
-
-threading.Thread(target=_bg_loop_runner, daemon=True).start()
-
-
-def _run_async(coro, timeout=30):
-    """Schedule a coroutine on the persistent background loop and wait."""
-    future = asyncio.run_coroutine_threadsafe(coro, _bg_loop)
-    return future.result(timeout=timeout)
-
-
-# Initialise the Telegram app ONCE on the background loop.
-_run_async(tg_app.initialize())
-
-
-async def process_update(update_data: dict):
-    """Reuses the global Telegram app on the persistent background loop."""
-    update = Update.de_json(update_data, tg_app.bot)
-    await tg_app.process_update(update)
+async def _set_bot_commands():
+    """Register slash-command descriptions visible in the Telegram menu."""
+    await tg_app.bot.set_my_commands(BOT_COMMANDS)
 
 
 # ---------------------------------------------------------
-# 13. FLASK APP / ROUTES
+# 13. FLASK APP  (keepalive Web Service for Render)
+#
+# Runs on a background daemon thread so Render's health-checks
+# always get a 200, while the main thread drives PTB polling.
 # ---------------------------------------------------------
 
 app = Flask(__name__)
@@ -1215,73 +1106,54 @@ def home():
     return "Bot is alive!", 200
 
 
-@app.route("/api/webhook", methods=["POST"])
-def webhook():
-    """Fire-and-forget: schedule the update on the background loop and
-       ACK Telegram immediately (<10 ms typical). Long-running handlers
-       like /testdraws now finish on the bg loop without blocking the
-       webhook response — protected by Vercel maxDuration=300."""
-    data = flask_request.get_json(force=True, silent=True)
-    if not data:
-        return "ok", 200
-    try:
-        # No .result() → don't wait. The coroutine runs on _bg_loop.
-        asyncio.run_coroutine_threadsafe(process_update(data), _bg_loop)
-    except Exception as e:
-        print(f"[WEBHOOK ERROR] {e}")
-    return "ok", 200
-
-
-@app.route("/api/set_webhook", methods=["GET"])
-def set_webhook():
-    async def _set():
-        await tg_app.bot.set_my_commands(BOT_COMMANDS)
-        domain = flask_request.host_url.rstrip("/")
-        webhook_url = f"{domain}/api/webhook"
-        await tg_app.bot.set_webhook(url=webhook_url)
-        return webhook_url
-
-    try:
-        webhook_url = _run_async(_set())
-        return f"✅ Webhook set to: {webhook_url}", 200
-    except Exception as e:
-        print(f"[SET_WEBHOOK ERROR] {e}")
-        return f"❌ Error: {e}", 500
-
-
-@app.route("/api/verify_leagues", methods=["GET"])
-def verify_leagues_endpoint():
-    """On-demand re-verification of the league whitelist.
-       Returns a JSON report showing each target league's resolved API ID
-       (or NOT_FOUND with the candidates it considered)."""
-    from flask import jsonify
-    allowed, suppression, report = verify_and_fix_league_ids(TARGET_LEAGUES)
-    if allowed:
-        ALLOWED_LEAGUES.clear(); ALLOWED_LEAGUES.update(allowed)
-        SUPPRESSION_LEAGUES.clear(); SUPPRESSION_LEAGUES.update(suppression)
-    return jsonify({
-        "resolved":           len([r for r in report if r.get("status") == "OK"]),
-        "not_found":          len([r for r in report if r.get("status") == "NOT_FOUND"]),
-        "suppression_count":  len(suppression),
-        "report":             report,
-    }), 200
-
-
 @app.route("/api/run_daily", methods=["GET", "POST"])
 def run_daily():
-    """Vercel Cron @ 00:05 UTC.
-       FIX 9 — strict order: reset_all_caches() THEN run_analysis()."""
+    """Manual or external-cron trigger: reset caches then re-analyse."""
     reset_all_caches()
     result = run_analysis()
     preview = result[:120] if result else "No results"
     return f"✅ Analysis complete: {preview}", 200
 
 
+@app.route("/api/verify_leagues", methods=["GET"])
+def verify_leagues_endpoint():
+    """On-demand re-verification of the league whitelist."""
+    from flask import jsonify
+    allowed, suppression, report = verify_and_fix_league_ids(TARGET_LEAGUES)
+    if allowed:
+        ALLOWED_LEAGUES.clear(); ALLOWED_LEAGUES.update(allowed)
+        SUPPRESSION_LEAGUES.clear(); SUPPRESSION_LEAGUES.update(suppression)
+    return jsonify({
+        "resolved":          len([r for r in report if r.get("status") == "OK"]),
+        "not_found":         len([r for r in report if r.get("status") == "NOT_FOUND"]),
+        "suppression_count": len(suppression),
+        "report":            report,
+    }), 200
+
+
+def _run_flask():
+    """Start Flask on the PORT env-var (required by Render)."""
+    port = int(os.getenv("PORT", "8080"))
+    print(f"[INFO] Flask keepalive server starting on 0.0.0.0:{port}")
+    # use_reloader=False is mandatory — reloader forks the process and
+    # would launch a second polling loop, causing Telegram conflicts.
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+
 # ---------------------------------------------------------
-# 14. LOCAL DEV ENTRYPOINT (Replit / direct run)
+# 14. ENTRYPOINT — Flask on daemon thread, PTB polling on main
 # ---------------------------------------------------------
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8080"))
-    print(f"[INFO] Starting Flask server on port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    # 1. Start Flask in the background so Render sees an HTTP service.
+    flask_thread = threading.Thread(target=_run_flask, daemon=True)
+    flask_thread.start()
+
+    # 2. Register bot commands once before polling begins.
+    asyncio.get_event_loop().run_until_complete(_set_bot_commands())
+
+    # 3. Start long-polling — blocks the main thread (intended).
+    #    drop_pending_updates=True discards any messages that arrived
+    #    while the bot was offline, preventing a replay flood on restart.
+    print("[INFO] Starting Telegram polling...")
+    tg_app.run_polling(drop_pending_updates=True)
